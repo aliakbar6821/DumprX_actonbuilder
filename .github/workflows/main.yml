@@ -1,0 +1,82 @@
+name: ROM Dumper
+
+on:
+  workflow_dispatch:
+    inputs:
+      rom_url:
+        description: 'Direct download link to ROM zip/tgz'
+        required: true
+      device:
+        description: 'Device codename (e.g. cancunf)'
+        required: true
+        default: 'cancunf'
+
+jobs:
+  dump:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup DumprX dependencies
+        run: |
+          sudo apt -y update
+          sudo apt install -y unace unrar zip unzip p7zip-full p7zip-rar \
+            sharutils rar uudeview mpack arj cabextract device-tree-compiler \
+            liblzma-dev brotli liblz4-tool axel gawk aria2 detox cpio rename \
+            liblz4-dev jq git-lfs
+
+      - name: Install uv
+        run: |
+          curl -sL https://astral.sh/uv/install.sh | bash
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Clone DumprX
+        run: |
+          git clone --depth=1 https://github.com/DumprX/DumprX DumprX
+
+      - name: Download ROM
+        run: |
+          cd DumprX
+          aria2c -x16 -s16 -k1M "${{ github.event.inputs.rom_url }}" -o rom_file
+          ls -lh rom_file
+
+      - name: Run DumprX
+        run: |
+          cd DumprX
+          bash dumper.sh rom_file
+
+      - name: Collect files
+        run: |
+          mkdir -p release_files
+
+          # vendor/build.prop
+          find DumprX/ -path "*/vendor/build.prop" | head -1 | \
+            xargs -I{} cp {} release_files/vendor_build.prop 2>/dev/null || \
+            echo "vendor/build.prop not found"
+
+          # vendor/etc/selinux/plat_sepolicy_vers.txt
+          find DumprX/ -path "*/vendor/etc/selinux/plat_sepolicy_vers.txt" | head -1 | \
+            xargs -I{} cp {} release_files/vendor_plat_sepolicy_vers.txt 2>/dev/null || \
+            echo "vendor plat_sepolicy_vers.txt not found"
+
+          # system plat_sepolicy_vers.txt (for cross-checking)
+          find DumprX/ -path "*/system/etc/selinux/plat_sepolicy_vers.txt" | head -1 | \
+            xargs -I{} cp {} release_files/system_plat_sepolicy_vers.txt 2>/dev/null || \
+            echo "system plat_sepolicy_vers.txt not found"
+
+          echo "=== Files to upload ==="
+          ls -lh release_files/
+
+      - name: Upload files to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dump-${{ github.event.inputs.device }}-${{ github.run_number }}
+          name: "${{ github.event.inputs.device }} vendor dump"
+          body: |
+            ROM URL: ${{ github.event.inputs.rom_url }}
+            Device: ${{ github.event.inputs.device }}
+          files: release_files/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
