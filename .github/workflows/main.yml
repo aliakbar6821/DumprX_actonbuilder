@@ -18,22 +18,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup DumprX dependencies
-        run: |
-          sudo apt -y update
-          sudo apt install -y unace unrar zip unzip p7zip-full p7zip-rar \
-            sharutils rar uudeview mpack arj cabextract device-tree-compiler \
-            liblzma-dev brotli liblz4-tool axel gawk aria2 detox cpio rename \
-            liblz4-dev jq git-lfs
-
-      - name: Install uv
-        run: |
-          curl -sL https://astral.sh/uv/install.sh | bash
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
       - name: Clone DumprX
         run: |
           git clone --depth=1 https://github.com/DumprX/DumprX DumprX
+
+      - name: Run DumprX Setup
+        run: |
+          cd DumprX
+          bash setup.sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Download ROM
         run: |
@@ -44,29 +38,46 @@ jobs:
       - name: Run DumprX
         run: |
           cd DumprX
-          bash dumper.sh rom_file
+          export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+          bash dumper.sh rom_file || true
+          echo "=== Output directory structure ==="
+          find out/ -maxdepth 4 -type d 2>/dev/null | head -30 || echo "No out/ directory found"
 
       - name: Collect files
         run: |
           mkdir -p release_files
+          SEARCH_DIR="DumprX/out"
 
           # vendor/build.prop
-          find DumprX/ -path "*/vendor/build.prop" | head -1 | \
-            xargs -I{} cp {} release_files/vendor_build.prop 2>/dev/null || \
+          result=$(find $SEARCH_DIR -path "*/vendor/build.prop" 2>/dev/null | head -1)
+          if [ -n "$result" ]; then
+            cp "$result" release_files/vendor_build.prop
+            echo "Found vendor/build.prop: $result"
+          else
             echo "vendor/build.prop not found"
+          fi
 
           # vendor/etc/selinux/plat_sepolicy_vers.txt
-          find DumprX/ -path "*/vendor/etc/selinux/plat_sepolicy_vers.txt" | head -1 | \
-            xargs -I{} cp {} release_files/vendor_plat_sepolicy_vers.txt 2>/dev/null || \
+          result=$(find $SEARCH_DIR -path "*/vendor/etc/selinux/plat_sepolicy_vers.txt" 2>/dev/null | head -1)
+          if [ -n "$result" ]; then
+            cp "$result" release_files/vendor_plat_sepolicy_vers.txt
+            echo "Found vendor plat_sepolicy_vers.txt: $result"
+          else
             echo "vendor plat_sepolicy_vers.txt not found"
+          fi
 
-          # system plat_sepolicy_vers.txt (for cross-checking)
-          find DumprX/ -path "*/system/etc/selinux/plat_sepolicy_vers.txt" | head -1 | \
-            xargs -I{} cp {} release_files/system_plat_sepolicy_vers.txt 2>/dev/null || \
+          # system/etc/selinux/plat_sepolicy_vers.txt
+          result=$(find $SEARCH_DIR -path "*/system/etc/selinux/plat_sepolicy_vers.txt" 2>/dev/null | head -1)
+          if [ -n "$result" ]; then
+            cp "$result" release_files/system_plat_sepolicy_vers.txt
+            echo "Found system plat_sepolicy_vers.txt: $result"
+          else
             echo "system plat_sepolicy_vers.txt not found"
+          fi
 
           echo "=== Files to upload ==="
           ls -lh release_files/
+          [ "$(ls -A release_files/)" ] || { echo "No files collected!"; exit 1; }
 
       - name: Upload files to Release
         uses: softprops/action-gh-release@v2
@@ -79,4 +90,3 @@ jobs:
           files: release_files/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
