@@ -1,4 +1,4 @@
-name: ROM Dumper
+name: ROM Dumper fast
 
 on:
   workflow_dispatch:
