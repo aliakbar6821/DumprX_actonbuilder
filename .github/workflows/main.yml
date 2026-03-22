@@ -3,56 +3,51 @@ name: ROM Dumper
 on:
   workflow_dispatch:
     inputs:
-      rom_url:
-        description: 'Direct download link to ROM zip/tgz'
+      link:
+        description: 'Firmware Link'
         required: true
       device:
         description: 'Device codename (e.g. cancunf)'
         required: true
         default: 'cancunf'
 
+env:
+  LINK: ${{ github.event.inputs.link }}
+  TZ: Asia/Kolkata
+
 jobs:
-  dump:
+  Firmware-Dump:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+
+      - name: Cleanup Space
+        uses: rokibhasansagar/slimhub_actions@main
 
       - name: Clone DumprX
         run: |
-          git clone --depth=1 https://github.com/DumprX/DumprX DumprX
+          git clone https://github.com/sarthakroy2002/DumprX --depth=1
 
-      - name: Run DumprX Setup
+      - name: Install Requirements
         run: |
           cd DumprX
           bash setup.sh
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-      - name: Download ROM
+      - name: Dump Firmware
         run: |
           cd DumprX
-          aria2c -x16 -s16 -k1M "${{ github.event.inputs.rom_url }}" -o rom_file
-          ls -lh rom_file
+          bash dumper.sh $LINK
 
-      - name: Run DumprX
-        run: |
-          cd DumprX
-          export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-          bash dumper.sh rom_file || true
-          echo "=== Output directory structure ==="
-          find out/ -maxdepth 4 -type d 2>/dev/null | head -30 || echo "No out/ directory found"
-
-      - name: Collect files
+      - name: Collect Files
         run: |
           mkdir -p release_files
+
           SEARCH_DIR="DumprX/out"
 
           # vendor/build.prop
           result=$(find $SEARCH_DIR -path "*/vendor/build.prop" 2>/dev/null | head -1)
           if [ -n "$result" ]; then
             cp "$result" release_files/vendor_build.prop
-            echo "Found vendor/build.prop: $result"
+            echo "Found: $result"
           else
             echo "vendor/build.prop not found"
           fi
@@ -61,7 +56,7 @@ jobs:
           result=$(find $SEARCH_DIR -path "*/vendor/etc/selinux/plat_sepolicy_vers.txt" 2>/dev/null | head -1)
           if [ -n "$result" ]; then
             cp "$result" release_files/vendor_plat_sepolicy_vers.txt
-            echo "Found vendor plat_sepolicy_vers.txt: $result"
+            echo "Found: $result"
           else
             echo "vendor plat_sepolicy_vers.txt not found"
           fi
@@ -70,7 +65,7 @@ jobs:
           result=$(find $SEARCH_DIR -path "*/system/etc/selinux/plat_sepolicy_vers.txt" 2>/dev/null | head -1)
           if [ -n "$result" ]; then
             cp "$result" release_files/system_plat_sepolicy_vers.txt
-            echo "Found system plat_sepolicy_vers.txt: $result"
+            echo "Found: $result"
           else
             echo "system plat_sepolicy_vers.txt not found"
           fi
@@ -79,13 +74,13 @@ jobs:
           ls -lh release_files/
           [ "$(ls -A release_files/)" ] || { echo "No files collected!"; exit 1; }
 
-      - name: Upload files to Release
+      - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: dump-${{ github.event.inputs.device }}-${{ github.run_number }}
           name: "${{ github.event.inputs.device }} vendor dump"
           body: |
-            ROM URL: ${{ github.event.inputs.rom_url }}
+            Firmware: ${{ github.event.inputs.link }}
             Device: ${{ github.event.inputs.device }}
           files: release_files/*
         env:
