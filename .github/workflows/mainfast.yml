@@ -33,7 +33,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt -y update
-          sudo apt install -y unzip p7zip-full wget
+          sudo apt install -y unzip p7zip-full
 
       - name: Install payload-dumper-go
         run: |
@@ -45,7 +45,7 @@ jobs:
 
       - name: Download ROM
         run: |
-          wget --no-check-certificate -O rom.zip "$LINK"
+          curl -L -k -o rom.zip "$LINK"
           ls -lh rom.zip
 
       - name: Extract payload.bin from ROM
