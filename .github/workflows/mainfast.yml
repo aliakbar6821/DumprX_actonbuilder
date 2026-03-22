@@ -33,7 +33,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt -y update
-          sudo apt install -y unzip p7zip-full
+          sudo apt install -y unzip p7zip-full aria2
 
       - name: Install payload-dumper-go
         run: |
@@ -45,7 +45,7 @@ jobs:
 
       - name: Download ROM
         run: |
-          curl -L -k -o rom.zip "$LINK"
+          aria2c -x16 -s16 -k1M --check-certificate=false -o rom.zip "$LINK"
           ls -lh rom.zip
 
       - name: Extract payload.bin from ROM
@@ -124,3 +124,4 @@ jobs:
           files: release_files/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
