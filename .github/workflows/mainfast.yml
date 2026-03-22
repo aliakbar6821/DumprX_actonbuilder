@@ -1,0 +1,88 @@
+name: ROM Dumper Fast
+
+on:
+  workflow_dispatch:
+    inputs:
+      link:
+        description: 'Firmware Link'
+        required: true
+      device:
+        description: 'Device codename (e.g. cancunf)'
+        required: true
+        default: 'cancunf'
+
+env:
+  LINK: ${{ github.event.inputs.link }}
+  TZ: Asia/Kolkata
+
+jobs:
+  Firmware-Dump:
+    runs-on: ubuntu-22.04
+    steps:
+
+      - name: Cleanup Space
+        uses: rokibhasansagar/slimhub_actions@main
+
+      - name: Clone DumprX
+        run: |
+          git clone https://github.com/sarthakroy2002/DumprX --depth=1
+
+      - name: Install Requirements
+        run: |
+          cd DumprX
+          bash setup.sh
+
+      - name: Dump Firmware
+        run: |
+          cd DumprX
+          bash dumper.sh $LINK
+
+      - name: Collect Files
+        run: |
+          mkdir -p release_files
+
+          SEARCH_DIR="DumprX/out"
+
+          # vendor/build.prop
+          result=$(find $SEARCH_DIR -path "*/vendor/build.prop" 2>/dev/null | head -1)
+          if [ -n "$result" ]; then
+            cp "$result" release_files/vendor_build.prop
+            echo "Found: $result"
+          else
+            echo "vendor/build.prop not found"
+          fi
+
+          # vendor/etc/selinux/plat_sepolicy_vers.txt
+          result=$(find $SEARCH_DIR -path "*/vendor/etc/selinux/plat_sepolicy_vers.txt" 2>/dev/null | head -1)
+          if [ -n "$result" ]; then
+            cp "$result" release_files/vendor_plat_sepolicy_vers.txt
+            echo "Found: $result"
+          else
+            echo "vendor plat_sepolicy_vers.txt not found"
+          fi
+
+          # system/etc/selinux/plat_sepolicy_vers.txt
+          result=$(find $SEARCH_DIR -path "*/system/etc/selinux/plat_sepolicy_vers.txt" 2>/dev/null | head -1)
+          if [ -n "$result" ]; then
+            cp "$result" release_files/system_plat_sepolicy_vers.txt
+            echo "Found: $result"
+          else
+            echo "system plat_sepolicy_vers.txt not found"
+          fi
+
+          echo "=== Files to upload ==="
+          ls -lh release_files/
+          [ "$(ls -A release_files/)" ] || { echo "No files collected!"; exit 1; }
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dump-${{ github.event.inputs.device }}-${{ github.run_number }}
+          name: "${{ github.event.inputs.device }} vendor dump"
+          body: |
+            Firmware: ${{ github.event.inputs.link }}
+            Device: ${{ github.event.inputs.device }}
+          files: release_files/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
