@@ -1,4 +1,4 @@
-name: ROM Dumper fast
+name: ROM Dumper new
 
 on:
   workflow_dispatch:
@@ -20,47 +20,13 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
 
-      - name: Cleanup Space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache
-          sudo rm -rf /usr/local/share/boost
-          sudo apt-get clean
-          df -h
-
-      - name: Install Dependencies
-        run: |
-          sudo apt -y update
-          sudo apt install -y unzip p7zip-full aria2
-
-      - name: Install payload-dumper-go
-        run: |
-          LATEST=$(curl -s https://api.github.com/repos/ssut/payload-dumper-go/releases/latest | grep browser_download_url | grep linux_amd64 | cut -d '"' -f 4)
-          wget -q "$LATEST" -O payload-dumper-go.tar.gz
-          tar -xzf payload-dumper-go.tar.gz
-          sudo mv payload-dumper-go /usr/local/bin/
-          echo "payload-dumper-go ready"
-
-      - name: Download ROM
+      - name: Download ROM First
         run: |
           aria2c -x16 -s16 -k1M --check-certificate=false -o rom.zip "$LINK"
           ls -lh rom.zip
 
-      - name: Extract payload.bin from ROM
-        run: |
-          mkdir -p extracted
-          unzip -p rom.zip payload.bin > extracted/payload.bin 2>/dev/null || \
-          7z e rom.zip payload.bin -o extracted/ 2>/dev/null || true
-          ls -lh extracted/
-
-      - name: Extract vendor and system only
-        run: |
-          mkdir -p payload_out
-          payload-dumper-go -partitions vendor,system -o payload_out/ extracted/payload.bin
-          echo "=== Extracted images ==="
-          ls -lh payload_out/
+      - name: Cleanup Space
+        uses: rokibhasansagar/slimhub_actions@main
 
       - name: Clone DumprX
         run: |
@@ -71,14 +37,11 @@ jobs:
           cd DumprX
           bash setup.sh
 
-      - name: Run DumprX on extracted images
+      - name: Run DumprX
         run: |
           cd DumprX
-          mkdir -p out
-          bash dumper.sh ../payload_out/vendor.img || true
-          bash dumper.sh ../payload_out/system.img || true
-          echo "=== DumprX output ==="
-          find out/ -maxdepth 3 -type d | head -20
+          mv ../rom.zip .
+          bash dumper.sh rom.zip
 
       - name: Collect Files
         run: |
