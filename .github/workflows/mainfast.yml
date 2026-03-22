@@ -1,4 +1,4 @@
-name: ROM Dumper Fast
+name: ROM Dumper fast
 
 on:
   workflow_dispatch:
@@ -21,7 +21,14 @@ jobs:
     steps:
 
       - name: Cleanup Space
-        uses: rokibhasansagar/slimhub_actions@main
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/local/share/boost
+          sudo apt-get clean
+          df -h
 
       - name: Clone DumprX
         run: |
@@ -40,10 +47,8 @@ jobs:
       - name: Collect Files
         run: |
           mkdir -p release_files
-
           SEARCH_DIR="DumprX/out"
 
-          # vendor/build.prop
           result=$(find $SEARCH_DIR -path "*/vendor/build.prop" 2>/dev/null | head -1)
           if [ -n "$result" ]; then
             cp "$result" release_files/vendor_build.prop
@@ -52,7 +57,6 @@ jobs:
             echo "vendor/build.prop not found"
           fi
 
-          # vendor/etc/selinux/plat_sepolicy_vers.txt
           result=$(find $SEARCH_DIR -path "*/vendor/etc/selinux/plat_sepolicy_vers.txt" 2>/dev/null | head -1)
           if [ -n "$result" ]; then
             cp "$result" release_files/vendor_plat_sepolicy_vers.txt
@@ -61,7 +65,6 @@ jobs:
             echo "vendor plat_sepolicy_vers.txt not found"
           fi
 
-          # system/etc/selinux/plat_sepolicy_vers.txt
           result=$(find $SEARCH_DIR -path "*/system/etc/selinux/plat_sepolicy_vers.txt" 2>/dev/null | head -1)
           if [ -n "$result" ]; then
             cp "$result" release_files/system_plat_sepolicy_vers.txt
@@ -85,4 +88,3 @@ jobs:
           files: release_files/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
