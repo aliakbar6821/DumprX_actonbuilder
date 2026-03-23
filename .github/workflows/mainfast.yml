@@ -1,4 +1,4 @@
-name: ROM Dumper new
+name: ROM Dumper
 
 on:
   workflow_dispatch:
@@ -48,6 +48,7 @@ jobs:
           mkdir -p release_files
           SEARCH_DIR="DumprX/out"
 
+          # vendor/build.prop
           result=$(find $SEARCH_DIR -path "*/vendor/build.prop" 2>/dev/null | head -1)
           if [ -n "$result" ]; then
             cp "$result" release_files/vendor_build.prop
@@ -56,21 +57,50 @@ jobs:
             echo "vendor/build.prop not found"
           fi
 
-          result=$(find $SEARCH_DIR -path "*/vendor/etc/selinux/plat_sepolicy_vers.txt" 2>/dev/null | head -1)
+          # vendor selinux folder
+          result=$(find $SEARCH_DIR -path "*/vendor/etc/selinux" -type d 2>/dev/null | head -1)
           if [ -n "$result" ]; then
-            cp "$result" release_files/vendor_plat_sepolicy_vers.txt
-            echo "Found: $result"
+            mkdir -p release_files/vendor_selinux
+            cp -r "$result"/. release_files/vendor_selinux/
+            echo "Found vendor selinux: $result"
           else
-            echo "vendor plat_sepolicy_vers.txt not found"
+            echo "vendor selinux not found"
           fi
 
-          result=$(find $SEARCH_DIR -path "*/system/etc/selinux/plat_sepolicy_vers.txt" 2>/dev/null | head -1)
+          # system selinux folder
+          result=$(find $SEARCH_DIR -path "*/system/etc/selinux" -type d 2>/dev/null | head -1)
           if [ -n "$result" ]; then
-            cp "$result" release_files/system_plat_sepolicy_vers.txt
-            echo "Found: $result"
+            mkdir -p release_files/system_selinux
+            cp -r "$result"/. release_files/system_selinux/
+            echo "Found system selinux: $result"
           else
-            echo "system plat_sepolicy_vers.txt not found"
+            echo "system selinux not found"
           fi
+
+          # system_ext selinux folder
+          result=$(find $SEARCH_DIR -path "*/system_ext/etc/selinux" -type d 2>/dev/null | head -1)
+          if [ -n "$result" ]; then
+            mkdir -p release_files/system_ext_selinux
+            cp -r "$result"/. release_files/system_ext_selinux/
+            echo "Found system_ext selinux: $result"
+          else
+            echo "system_ext selinux not found"
+          fi
+
+          # product selinux folder
+          result=$(find $SEARCH_DIR -path "*/product/etc/selinux" -type d 2>/dev/null | head -1)
+          if [ -n "$result" ]; then
+            mkdir -p release_files/product_selinux
+            cp -r "$result"/. release_files/product_selinux/
+            echo "Found product selinux: $result"
+          else
+            echo "product selinux not found"
+          fi
+
+          # Zip all selinux folders together
+          cd release_files
+          zip -r selinux_all.zip vendor_selinux/ system_selinux/ system_ext_selinux/ product_selinux/ 2>/dev/null || true
+          cd ..
 
           echo "=== Files to upload ==="
           ls -lh release_files/
@@ -84,7 +114,8 @@ jobs:
           body: |
             Firmware: ${{ github.event.inputs.link }}
             Device: ${{ github.event.inputs.device }}
-          files: release_files/*
+          files: |
+            release_files/vendor_build.prop
+            release_files/selinux_all.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
