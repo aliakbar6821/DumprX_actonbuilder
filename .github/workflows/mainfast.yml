@@ -1,4 +1,4 @@
-name: ROM Dumper
+name: ROM Dumper all
 
 on:
   workflow_dispatch:
