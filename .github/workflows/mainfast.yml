@@ -1,4 +1,4 @@
-name: ROM Dumper urgent
+name: ROM Dumper urgent advance 
 
 on:
   workflow_dispatch:
@@ -106,6 +106,329 @@ jobs:
           if [ -z "$result" ]; then
             result=$(find $SEARCH_DIR -path "*/odm" -type d 2>/dev/null | head -1)
           fi
+
+          if [ -n "$result" ]; then
+            mkdir -p release_files/odm
+            cp -r "$result"/. release_files/odm/
+            echo "Found odm: $result"
+          else
+            echo "odm not found"
+          fi
+
+          # Zip selinux folders
+          cd release_files
+          zip -r selinux_all.zip vendor_selinux/ system_selinux/ system_ext_selinux/ product_selinux/ 2>/dev/null || true
+
+          # Zip odm
+          zip -r odm.zip odm/ 2>/dev/null || true
+          cd ..
+
+          echo "=== Files to upload ==="
+          ls -lh release_files/
+
+          # Fail if nothing collected
+          if [ -z "$(ls -A release_files/)" ]; then
+            echo "No files collected!"
+            exit 1
+          fi
+
+      - name: Extract Binaries + Dependencies
+        if: ${{ github.event.inputs.binaries != '' }}
+        run: |
+          SEARCH_DIR="DumprX/out"
+          BINARIES_LIST="${{ github.event.inputs.binaries }}"
+          
+          # Convert comma-separated list to array
+          IFS=',' read -ra BINARIES <<< "$BINARIES_LIST"
+          
+          mkdir -p custom_extract
+          ALL_DEPS_LOG=custom_extract/all_deps.log
+          PROCESSED_LIBS_LOG=custom_extract/processed_libs.log
+          BINARIES_LOG=custom_extract/binaries.log
+          
+          # Install required tools
+          sudo apt-get update
+          sudo apt-get install -y binutils file tree
+
+          # Function to extract all dependencies using multiple methods
+          extract_dependencies() {
+            local FILE="$1"
+            local DEP_LIST="$2"
+            
+            if [ ! -f "$FILE" ]; then
+              return 1
+            fi
+            
+            echo "  Analyzing: $FILE" >> "$DEP_LIST.log"
+            
+            if file "$FILE" | grep -q "ELF"; then
+              # Use readelf to get dynamic section
+              readelf -d "$FILE" 2>/dev/null | grep "NEEDED" | sed 's/.*\[//' | sed 's/\]//' >> "$DEP_LIST"
+              
+              # Use objdump for more thorough checking
+              objdump -p "$FILE" 2>/dev/null | grep "NEEDED" | awk '{print $2}' >> "$DEP_LIST"
+            fi
+          }
+
+          # Function to find and copy library
+          copy_lib() {
+            local LIB_NAME="$1"
+            local DEPTH="$2"
+            
+            # Normalize library name (remove version suffixes)
+            local BASE_LIB=$(echo "$LIB_NAME" | sed 's/\.so\.[0-9.]*$/.so/' | sed 's/\.so$/.so/')
+            
+            # Skip if already processed
+            if grep -q "^$BASE_LIB$" "$PROCESSED_LIBS_LOG" 2>/dev/null; then
+              return 0
+            fi
+            
+            echo "    Looking for: $BASE_LIB"
+            
+            # Search in all possible locations within DumprX output
+            # Exclude hwasan/asan and special directories
+            FOUND=$(find $SEARCH_DIR -type f -name "$BASE_LIB" -o -name "$LIB_NAME" 2>/dev/null | grep -v "hwasan" | grep -v "asan" | head -1)
+            
+            # If not found, try with wildcard for versioned libs
+            if [ -z "$FOUND" ]; then
+              FOUND=$(find $SEARCH_DIR -type f -name "${BASE_LIB}.*" 2>/dev/null | grep -v "hwasan" | grep -v "asan" | head -1)
+            fi
+            
+            if [ -n "$FOUND" ] && [ -f "$FOUND" ]; then
+              REL=${FOUND#$SEARCH_DIR/}
+              mkdir -p custom_extract/$(dirname "$REL")
+              cp "$FOUND" custom_extract/$REL
+              echo "$BASE_LIB" >> "$PROCESSED_LIBS_LOG"
+              echo "    ✓ Copied: $REL"
+              
+              # Recursively process this library's dependencies
+              process_file_deps "$FOUND" $((DEPTH + 1))
+              return 0
+            else
+              echo "    ✗ Not found: $LIB_NAME"
+              return 1
+            fi
+          }
+
+          # Process a file to extract all its dependencies
+          process_file_deps() {
+            local FILE="$1"
+            local DEPTH="$2"
+            
+            # Limit recursion depth
+            if [ "$DEPTH" -gt 15 ] || [ ! -f "$FILE" ]; then
+              return 0
+            fi
+            
+            local TEMP_DEPS="$(mktemp)"
+            extract_dependencies "$FILE" "$TEMP_DEPS"
+            
+            # Process each unique dependency
+            sort -u "$TEMP_DEPS" | while read lib; do
+              if [ -n "$lib" ]; then
+                copy_lib "$lib" "$DEPTH"
+              fi
+            done
+            
+            rm -f "$TEMP_DEPS"
+          }
+
+          # Function to find manifest XML for a binary
+          find_manifest_for_binary() {
+            local BIN_PATH="$1"
+            local BIN_NAME="$2"
+            local MANIFEST_FOUND=""
+            
+            echo "  Searching for manifest files for: $BIN_NAME"
+            
+            # Method 1: Search for manifest files in the same partition as the binary
+            BIN_DIR=$(dirname "$BIN_PATH")
+            BIN_PARTITION=$(echo "$BIN_DIR" | grep -oE '(system|vendor|odm|product|system_ext)' | head -1)
+            
+            # Look for manifest in the same partition's etc/vintf directory
+            if [ -n "$BIN_PARTITION" ]; then
+              VINTF_PATH=$(find $SEARCH_DIR -path "*/$BIN_PARTITION/etc/vintf" -type d 2>/dev/null | head -1)
+              if [ -n "$VINTF_PATH" ]; then
+                # Find manifest files related to this binary
+                MANIFEST_FOUND=$(find "$VINTF_PATH" -type f \( -name "*.xml" -o -name "manifest*.xml" \) -exec grep -l "$BIN_NAME" {} \; 2>/dev/null | head -1)
+              fi
+            fi
+            
+            # Method 2: Search all vintf directories
+            if [ -z "$MANIFEST_FOUND" ]; then
+              MANIFEST_FOUND=$(find $SEARCH_DIR -path "*/etc/vintf/*" -type f -name "*.xml" -exec grep -l "$BIN_NAME" {} \; 2>/dev/null | head -1)
+            fi
+            
+            # Method 3: Search for manifest files with binary name in filename
+            if [ -z "$MANIFEST_FOUND" ]; then
+              BIN_BASENAME=$(basename "$BIN_NAME" | sed 's/^[^-]*-//' | sed 's/-service//' | sed 's/-V[0-9]*//')
+              MANIFEST_FOUND=$(find $SEARCH_DIR -type f \( -name "*${BIN_BASENAME}*.xml" -o -name "*charge*.xml" -o -name "*nfc*.xml" \) 2>/dev/null | head -1)
+            fi
+            
+            # Method 4: Search for any manifest in the same directory
+            if [ -z "$MANIFEST_FOUND" ]; then
+              MANIFEST_FOUND=$(find "$BIN_DIR" -type f -name "*.xml" 2>/dev/null | head -1)
+            fi
+            
+            if [ -n "$MANIFEST_FOUND" ] && [ -f "$MANIFEST_FOUND" ]; then
+              REL=${MANIFEST_FOUND#$SEARCH_DIR/}
+              mkdir -p custom_extract/$(dirname "$REL")
+              cp "$MANIFEST_FOUND" custom_extract/$REL
+              echo "  ✓ Copied manifest: $REL"
+              return 0
+            else
+              echo "  ✗ No manifest found for $BIN_NAME"
+              return 1
+            fi
+          }
+
+          # Initialize tracking files
+          touch "$PROCESSED_LIBS_LOG" "$ALL_DEPS_LOG" "$BINARIES_LOG"
+          
+          # Process each binary
+          for BIN_NAME in "${BINARIES[@]}"; do
+            # Trim whitespace
+            BIN_NAME=$(echo "$BIN_NAME" | xargs)
+            
+            echo ""
+            echo "========================================="
+            echo "Processing binary: $BIN_NAME"
+            echo "========================================="
+            
+            # Find binary
+            BIN_PATH=$(find $SEARCH_DIR -type f \( -path "*/bin/*" -o -path "*/vendor/bin/*" -o -path "*/system/bin/*" \) -iname "*$BIN_NAME*" 2>/dev/null | head -1)
+            
+            # If not found in bin paths, search everywhere
+            if [ -z "$BIN_PATH" ]; then
+              BIN_PATH=$(find $SEARCH_DIR -type f -iname "*$BIN_NAME*" 2>/dev/null | head -1)
+            fi
+            
+            if [ -z "$BIN_PATH" ]; then
+              echo "✗ Binary not found: $BIN_NAME"
+              echo "$BIN_NAME: NOT_FOUND" >> "$BINARIES_LOG"
+              continue
+            fi
+            
+            echo "✓ Found binary: $BIN_PATH"
+            
+            # Preserve structure
+            REL_PATH=${BIN_PATH#$SEARCH_DIR/}
+            mkdir -p custom_extract/$(dirname "$REL_PATH")
+            cp "$BIN_PATH" custom_extract/$REL_PATH
+            echo "$BIN_NAME: $REL_PATH" >> "$BINARIES_LOG"
+            
+            # Process dependencies
+            echo "Extracting dependencies..."
+            process_file_deps "custom_extract/$REL_PATH" 0
+            
+            # Find manifest files
+            find_manifest_for_binary "$BIN_PATH" "$BIN_NAME"
+            
+            # Find .rc file
+            RC_FILE=$(find $SEARCH_DIR -type f -name "*.rc" -exec grep -l "$BIN_NAME" {} \; 2>/dev/null | head -1)
+            if [ -n "$RC_FILE" ]; then
+              REL=${RC_FILE#$SEARCH_DIR/}
+              mkdir -p custom_extract/$(dirname "$REL")
+              cp "$RC_FILE" custom_extract/$REL
+              echo "✓ Copied RC file: $REL"
+            fi
+            
+            # Find HAL files
+            HAL_FILE=$(find $SEARCH_DIR -type f -name "*.hal" -exec grep -l "$BIN_NAME" {} \; 2>/dev/null | head -1)
+            if [ -n "$HAL_FILE" ]; then
+              REL=${HAL_FILE#$SEARCH_DIR/}
+              mkdir -p custom_extract/$(dirname "$REL")
+              cp "$HAL_FILE" custom_extract/$REL
+              echo "✓ Copied HAL file: $REL"
+            fi
+          done
+          
+          # Additional pass: Copy common system libraries that might be needed
+          echo ""
+          echo "========================================="
+          echo "Adding common system libraries"
+          echo "========================================="
+          
+          COMMON_LIBS=("libbase.so" "libcutils.so" "libutils.so" "liblog.so" "libc++.so" "libc.so" "libm.so" "libdl.so" 
+                       "libhidlbase.so" "libhidltransport.so" "libhwbinder.so" "libbinder.so" "libandroid.so" 
+                       "libhardware.so" "libhardware_legacy.so" "libprocessgroup.so" "libselinux.so" "libavb.so")
+          
+          for common_lib in "${COMMON_LIBS[@]}"; do
+            if ! grep -q "^$common_lib$" "$PROCESSED_LIBS_LOG" 2>/dev/null; then
+              FOUND=$(find $SEARCH_DIR -type f -name "$common_lib" 2>/dev/null | grep -v "hwasan" | grep -v "asan" | head -1)
+              if [ -n "$FOUND" ] && [ -f "$FOUND" ]; then
+                REL=${FOUND#$SEARCH_DIR/}
+                mkdir -p custom_extract/$(dirname "$REL")
+                cp "$FOUND" custom_extract/$REL
+                echo "$common_lib" >> "$PROCESSED_LIBS_LOG"
+                echo "✓ Copied common lib: $REL"
+              fi
+            fi
+          done
+          
+          # Cleanup unnecessary files
+          echo ""
+          echo "========================================="
+          echo "Cleaning up unnecessary files"
+          echo "========================================="
+          
+          # Remove debug sections if present (optional - comment out if needed)
+          find custom_extract -type f -name "*.so" -exec strip --strip-debug {} \; 2>/dev/null || true
+          
+          # Remove empty directories
+          find custom_extract -type d -empty -delete 2>/dev/null || true
+          
+          # Show final statistics
+          echo ""
+          echo "========================================="
+          echo "Extraction Summary"
+          echo "========================================="
+          echo "Binaries processed: ${#BINARIES[@]}"
+          echo "Libraries copied: $(sort -u "$PROCESSED_LIBS_LOG" | wc -l)"
+          echo "Total files: $(find custom_extract -type f 2>/dev/null | wc -l)"
+          
+          echo ""
+          echo "=== Extracted binaries ==="
+          cat "$BINARIES_LOG"
+          
+          echo ""
+          echo "=== Libraries copied ==="
+          sort -u "$PROCESSED_LIBS_LOG"
+          
+          echo ""
+          echo "=== Directory structure ==="
+          tree custom_extract -L 3 2>/dev/null || find custom_extract -type f | head -20
+          
+          # Zip everything
+          if [ -d "custom_extract" ] && [ "$(find custom_extract -type f 2>/dev/null | wc -l)" -gt 0 ]; then
+            cd custom_extract
+            zip -r ../binary_extract.zip .
+            cd ..
+            echo ""
+            echo "✓ Created binary_extract.zip with $(find custom_extract -type f 2>/dev/null | wc -l) files"
+            ls -lh binary_extract.zip
+          else
+            echo "No files extracted for binaries"
+            exit 1
+          fi
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dump-${{ github.event.inputs.device }}-${{ github.run_number }}
+          name: "${{ github.event.inputs.device }} vendor dump"
+          body: |
+            Firmware: ${{ github.event.inputs.link }}
+            Device: ${{ github.event.inputs.device }}
+            Binaries: ${{ github.event.inputs.binaries }}
+          files: |
+            release_files/vendor_build.prop
+            release_files/selinux_all.zip
+            release_files/odm.zip
+            binary_extract.zip
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}          fi
 
           if [ -n "$result" ]; then
             mkdir -p release_files/odm
