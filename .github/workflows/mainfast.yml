@@ -1,4 +1,4 @@
-name: ROM Dumper urgent advance 
+name: ROM Dumper urgent advanced
 
 on:
   workflow_dispatch:
@@ -172,16 +172,13 @@ jobs:
             local FILE="$1"
             echo "Analyzing: $FILE"
             
-            # Method 1: Use ldd if available (for native analysis)
+            # Method 1: Use readelf if available
             if file "$FILE" | grep -q "ELF"; then
               # Use readelf to get dynamic section
               readelf -d "$FILE" 2>/dev/null | grep "NEEDED" | sed 's/.*\[//' | sed 's/\]//' >> "$DEP_LIST"
               
               # Use objdump for more thorough checking
               objdump -p "$FILE" 2>/dev/null | grep "NEEDED" | awk '{print $2}' >> "$DEP_LIST"
-              
-              # Use strings for any missed dependencies
-              strings "$FILE" | grep -E '\.so(\.[0-9]+)?$' >> "$DEP_LIST"
             fi
           }
 
@@ -201,14 +198,15 @@ jobs:
             echo "Looking for: $BASE_LIB (from $LIB_NAME)"
             
             # Search in all possible locations within DumprX output
-            FOUND=$(find $SEARCH_DIR -type f -name "$BASE_LIB" -o -name "$LIB_NAME" 2>/dev/null | head -1)
+            # Exclude hwasan and other special directories that might not have actual files
+            FOUND=$(find $SEARCH_DIR -type f -name "$BASE_LIB" -o -name "$LIB_NAME" 2>/dev/null | grep -v "hwasan" | grep -v "asan" | head -1)
             
             # If not found, try with wildcard for versioned libs
             if [ -z "$FOUND" ]; then
-              FOUND=$(find $SEARCH_DIR -type f -name "${BASE_LIB}.*" 2>/dev/null | head -1)
+              FOUND=$(find $SEARCH_DIR -type f -name "${BASE_LIB}.*" 2>/dev/null | grep -v "hwasan" | grep -v "asan" | head -1)
             fi
             
-            if [ -n "$FOUND" ]; then
+            if [ -n "$FOUND" ] && [ -f "$FOUND" ]; then
               REL=${FOUND#$SEARCH_DIR/}
               mkdir -p custom_extract/$(dirname "$REL")
               cp "$FOUND" custom_extract/$REL
@@ -230,8 +228,13 @@ jobs:
             local DEPTH="$2"
             
             # Limit recursion depth
-            if [ "$DEPTH" -gt 10 ]; then
+            if [ "$DEPTH" -gt 15 ]; then
               return 0
+            fi
+            
+            # Check if file exists
+            if [ ! -f "$FILE" ]; then
+              return 1
             fi
             
             # Clear and regenerate dependency list for this file
@@ -255,18 +258,19 @@ jobs:
           
           # Additional pass to catch any missed dependencies
           echo "Running second pass to catch missed dependencies..."
-          find custom_extract -type f -name "*.so" | while read libfile; do
+          find custom_extract -type f -name "*.so" 2>/dev/null | while read libfile; do
             process_file "$libfile" 0
           done
 
           # Also copy all libraries from vendor/lib and vendor/lib64 that might be needed
           echo "Copying common vendor libraries..."
-          COMMON_LIBS=("libbase.so" "libcutils.so" "libutils.so" "liblog.so" "libc++.so" "libc.so" "libm.so" "libdl.so" "libhidlbase.so" "libhidltransport.so" "libhwbinder.so" "libbinder.so")
+          COMMON_LIBS=("libbase.so" "libcutils.so" "libutils.so" "liblog.so" "libc++.so" "libc.so" "libm.so" "libdl.so" "libhidlbase.so" "libhidltransport.so" "libhwbinder.so" "libbinder.so" "libandroid.so" "libhardware.so")
           
           for common_lib in "${COMMON_LIBS[@]}"; do
             if ! grep -q "^$common_lib$" "$LOG" 2>/dev/null; then
-              FOUND=$(find $SEARCH_DIR -type f -name "$common_lib" 2>/dev/null | head -1)
-              if [ -n "$FOUND" ]; then
+              # Find real file, excluding special directories
+              FOUND=$(find $SEARCH_DIR -type f -name "$common_lib" 2>/dev/null | grep -v "hwasan" | grep -v "asan" | head -1)
+              if [ -n "$FOUND" ] && [ -f "$FOUND" ]; then
                 REL=${FOUND#$SEARCH_DIR/}
                 mkdir -p custom_extract/$(dirname "$REL")
                 cp "$FOUND" custom_extract/$REL
@@ -278,7 +282,7 @@ jobs:
 
           # Find and copy all HAL-related files
           echo "Searching for HAL files..."
-          find $SEARCH_DIR -type f \( -name "*.hal" -o -name "*manifest*.xml" -o -name "*compatibility*.xml" \) | while read hal_file; do
+          find $SEARCH_DIR -type f \( -name "*.hal" -o -name "*manifest*.xml" -o -name "*compatibility*.xml" \) 2>/dev/null | while read hal_file; do
             if grep -q "$BIN_NAME" "$hal_file" 2>/dev/null; then
               REL=${hal_file#$SEARCH_DIR/}
               mkdir -p custom_extract/$(dirname "$REL")
@@ -316,19 +320,19 @@ jobs:
           # Show what was extracted
           echo ""
           echo "=== Extracted files ==="
-          find custom_extract -type f | sort
+          find custom_extract -type f 2>/dev/null | sort
           
           echo ""
           echo "=== Libraries found ==="
-          cat "$LOG" | sort -u
+          cat "$LOG" 2>/dev/null | sort -u
 
           # Zip everything
-          if [ -d "custom_extract" ] && [ "$(ls -A custom_extract)" ]; then
+          if [ -d "custom_extract" ] && [ "$(find custom_extract -type f 2>/dev/null | wc -l)" -gt 0 ]; then
             cd custom_extract
             zip -r ../binary_extract.zip .
             cd ..
             echo ""
-            echo "✓ Created binary_extract.zip with $(find custom_extract -type f | wc -l) files"
+            echo "✓ Created binary_extract.zip with $(find custom_extract -type f 2>/dev/null | wc -l) files"
             ls -lh binary_extract.zip
           else
             echo "No files extracted for binary"
