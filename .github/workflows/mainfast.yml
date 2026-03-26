@@ -1,4 +1,4 @@
-name: ROM Dumper all
+name: ROM Dumper advance 
 
 on:
   workflow_dispatch:
@@ -10,6 +10,9 @@ on:
         description: 'Device codename (e.g. cancunf)'
         required: true
         default: 'cancunf'
+      binary:
+        description: 'Binary name to extract (optional, e.g. vendor.oplus.hardware.charger)'
+        required: false
 
 env:
   LINK: ${{ github.event.inputs.link }}
@@ -18,8 +21,8 @@ env:
 jobs:
   Firmware-Dump:
     runs-on: ubuntu-22.04
-    steps:
 
+    steps:
       - name: Download ROM First
         run: |
           aria2c -x16 -s16 -k1M --check-certificate=false -o rom.zip "$LINK"
@@ -97,15 +100,133 @@ jobs:
             echo "product selinux not found"
           fi
 
-          # Zip all selinux folders together
+          # ODM (vendor/odm or odm)
+          result=$(find $SEARCH_DIR -path "*/vendor/odm" -type d 2>/dev/null | head -1)
+          if [ -z "$result" ]; then
+            result=$(find $SEARCH_DIR -path "*/odm" -type d 2>/dev/null | head -1)
+          fi
+
+          if [ -n "$result" ]; then
+            mkdir -p release_files/odm
+            cp -r "$result"/. release_files/odm/
+            echo "Found odm: $result"
+          else
+            echo "odm not found"
+          fi
+
+          # Zip selinux folders
           cd release_files
           zip -r selinux_all.zip vendor_selinux/ system_selinux/ system_ext_selinux/ product_selinux/ 2>/dev/null || true
+
+          # Zip odm
+          zip -r odm.zip odm/ 2>/dev/null || true
           cd ..
 
           echo "=== Files to upload ==="
           ls -lh release_files/
-          [ "$(ls -A release_files/)" ] || { echo "No files collected!"; exit 1; }
 
+          # Fail if nothing collected
+          if [ -z "$(ls -A release_files/)" ]; then
+            echo "No files collected!"
+            exit 1
+          fi
+
+      - name: Extract Specific Binary + Dependencies
+        if: ${{ github.event.inputs.binary != '' }}
+        run: |
+          SEARCH_DIR="DumprX/out"
+          BIN_NAME="${{ github.event.inputs.binary }}"
+
+          mkdir -p custom_extract
+          LOG=custom_extract/extract.log
+
+          echo "Searching for binary: $BIN_NAME"
+
+          # Find binary (flexible match)
+          BIN_PATH=$(find $SEARCH_DIR -type f -path "*bin*" -iname "*$BIN_NAME*" 2>/dev/null | head -1)
+
+          if [ -z "$BIN_PATH" ]; then
+            echo "Binary not found!"
+            exit 1
+          fi
+
+          echo "Found binary: $BIN_PATH"
+
+          # Preserve structure
+          REL_PATH=${BIN_PATH#$SEARCH_DIR/}
+          mkdir -p custom_extract/$(dirname "$REL_PATH")
+          cp "$BIN_PATH" custom_extract/$REL_PATH
+
+          # Function to find and copy lib
+          copy_lib() {
+            LIB_NAME="$1"
+            FOUND=$(find $SEARCH_DIR -type f -name "$LIB_NAME" 2>/dev/null | head -1)
+            if [ -n "$FOUND" ]; then
+              REL=${FOUND#$SEARCH_DIR/}
+              mkdir -p custom_extract/$(dirname "$REL")
+              cp "$FOUND" custom_extract/$REL
+              echo "Copied lib: $LIB_NAME"
+              echo "$FOUND" >> $LOG
+            fi
+          }
+
+          # Recursive dependency resolver
+          process_file() {
+            FILE="$1"
+            strings "$FILE" | grep -oE '[a-zA-Z0-9._-]+\.so' | sort -u | while read lib; do
+              if ! grep -q "$lib" "$LOG" 2>/dev/null; then
+                copy_lib "$lib"
+                NEW_FILE=$(find custom_extract -name "$lib" | head -1)
+                if [ -n "$NEW_FILE" ]; then
+                  process_file "$NEW_FILE"
+                fi
+              fi
+            done
+          }
+
+          touch $LOG
+          process_file "custom_extract/$REL_PATH"
+
+          # Find .rc file
+          RC_FILE=$(find $SEARCH_DIR -type f -name "*.rc" -exec grep -l "$BIN_NAME" {} \; 2>/dev/null | head -1)
+          if [ -n "$RC_FILE" ]; then
+            REL=${RC_FILE#$SEARCH_DIR/}
+            mkdir -p custom_extract/$(dirname "$REL")
+            cp "$RC_FILE" custom_extract/$REL
+            echo "Copied RC file"
+          fi
+
+          # Find manifest.xml
+          MANIFEST=$(find $SEARCH_DIR -type f -name "manifest.xml" -exec grep -l "$BIN_NAME" {} \; 2>/dev/null | head -1)
+          if [ -n "$MANIFEST" ]; then
+            REL=${MANIFEST#$SEARCH_DIR/}
+            mkdir -p custom_extract/$(dirname "$REL")
+            cp "$MANIFEST" custom_extract/$REL
+            echo "Copied manifest.xml"
+          fi
+
+          # Zip everything
+          cd custom_extract
+          zip -r ../binary_extract.zip .
+          cd ..
+
+          echo "Done extracting binary and dependencies"
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dump-${{ github.event.inputs.device }}-${{ github.run_number }}
+          name: "${{ github.event.inputs.device }} vendor dump"
+          body: |
+            Firmware: ${{ github.event.inputs.link }}
+            Device: ${{ github.event.inputs.device }}
+          files: |
+            release_files/vendor_build.prop
+            release_files/selinux_all.zip
+            release_files/odm.zip
+            binary_extract.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
