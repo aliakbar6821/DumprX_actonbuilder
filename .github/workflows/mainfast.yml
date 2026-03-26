@@ -138,12 +138,18 @@ jobs:
           BIN_NAME="${{ github.event.inputs.binary }}"
 
           mkdir -p custom_extract
+          DEP_LIST=custom_extract/deps.list
           LOG=custom_extract/extract.log
 
           echo "Searching for binary: $BIN_NAME"
 
           # Find binary (flexible match)
-          BIN_PATH=$(find $SEARCH_DIR -type f -path "*bin*" -iname "*$BIN_NAME*" 2>/dev/null | head -1)
+          BIN_PATH=$(find $SEARCH_DIR -type f \( -path "*/bin/*" -o -path "*/vendor/bin/*" -o -path "*/system/bin/*" \) -iname "*$BIN_NAME*" 2>/dev/null | head -1)
+          
+          # If not found in bin paths, search everywhere
+          if [ -z "$BIN_PATH" ]; then
+            BIN_PATH=$(find $SEARCH_DIR -type f -iname "*$BIN_NAME*" 2>/dev/null | head -1)
+          fi
 
           if [ -z "$BIN_PATH" ]; then
             echo "Binary not found!"
@@ -157,42 +163,129 @@ jobs:
           mkdir -p custom_extract/$(dirname "$REL_PATH")
           cp "$BIN_PATH" custom_extract/$REL_PATH
 
-          # Function to find and copy lib from DumprX output
+          # Install required tools for better dependency analysis
+          sudo apt-get update
+          sudo apt-get install -y binutils file
+
+          # Function to extract all dependencies using multiple methods
+          extract_dependencies() {
+            local FILE="$1"
+            echo "Analyzing: $FILE"
+            
+            # Method 1: Use ldd if available (for native analysis)
+            if file "$FILE" | grep -q "ELF"; then
+              # Use readelf to get dynamic section
+              readelf -d "$FILE" 2>/dev/null | grep "NEEDED" | sed 's/.*\[//' | sed 's/\]//' >> "$DEP_LIST"
+              
+              # Use objdump for more thorough checking
+              objdump -p "$FILE" 2>/dev/null | grep "NEEDED" | awk '{print $2}' >> "$DEP_LIST"
+              
+              # Use strings for any missed dependencies
+              strings "$FILE" | grep -E '\.so(\.[0-9]+)?$' >> "$DEP_LIST"
+            fi
+          }
+
+          # Function to copy library and its dependencies recursively
           copy_lib() {
-            LIB_NAME="$1"
-            # Search in all directories within SEARCH_DIR
-            FOUND=$(find $SEARCH_DIR -type f -name "$LIB_NAME" 2>/dev/null | head -1)
+            local LIB_NAME="$1"
+            local DEPTH="$2"
+            
+            # Normalize library name (remove version suffixes)
+            local BASE_LIB=$(echo "$LIB_NAME" | sed 's/\.so\.[0-9.]*$/.so/' | sed 's/\.so$/.so/')
+            
+            # Skip if already processed
+            if grep -q "^$BASE_LIB$" "$LOG" 2>/dev/null; then
+              return 0
+            fi
+            
+            echo "Looking for: $BASE_LIB (from $LIB_NAME)"
+            
+            # Search in all possible locations within DumprX output
+            FOUND=$(find $SEARCH_DIR -type f -name "$BASE_LIB" -o -name "$LIB_NAME" 2>/dev/null | head -1)
+            
+            # If not found, try with wildcard for versioned libs
+            if [ -z "$FOUND" ]; then
+              FOUND=$(find $SEARCH_DIR -type f -name "${BASE_LIB}.*" 2>/dev/null | head -1)
+            fi
+            
             if [ -n "$FOUND" ]; then
               REL=${FOUND#$SEARCH_DIR/}
               mkdir -p custom_extract/$(dirname "$REL")
               cp "$FOUND" custom_extract/$REL
-              echo "Copied lib: $LIB_NAME from $REL"
-              echo "$LIB_NAME" >> $LOG
+              echo "$BASE_LIB" >> "$LOG"
+              echo "✓ Copied: $REL"
+              
+              # Recursively process this library's dependencies
+              process_file "$FOUND" $((DEPTH + 1))
               return 0
+            else
+              echo "✗ Not found: $LIB_NAME"
+              return 1
             fi
-            return 1
           }
 
-          # Recursive dependency resolver
+          # Process a file to extract all its dependencies
           process_file() {
-            FILE="$1"
-            echo "Processing dependencies for: $FILE"
-            strings "$FILE" | grep -oE '[a-zA-Z0-9._-]+\.so' | sort -u | while read lib; do
-              if ! grep -q "^$lib$" "$LOG" 2>/dev/null; then
-                if copy_lib "$lib"; then
-                  NEW_FILE=$(find custom_extract -name "$lib" | head -1)
-                  if [ -n "$NEW_FILE" ] && [ -f "$NEW_FILE" ]; then
-                    process_file "$NEW_FILE"
-                  fi
-                else
-                  echo "Warning: Library $lib not found for $FILE"
-                fi
+            local FILE="$1"
+            local DEPTH="$2"
+            
+            # Limit recursion depth
+            if [ "$DEPTH" -gt 10 ]; then
+              return 0
+            fi
+            
+            # Clear and regenerate dependency list for this file
+            > "$DEP_LIST"
+            extract_dependencies "$FILE"
+            
+            # Process each unique dependency
+            sort -u "$DEP_LIST" | while read lib; do
+              if [ -n "$lib" ]; then
+                copy_lib "$lib" "$DEPTH"
               fi
             done
           }
 
-          touch $LOG
-          process_file "custom_extract/$REL_PATH"
+          # Initialize tracking
+          touch "$LOG"
+          > "$DEP_LIST"
+          
+          # Process the main binary
+          process_file "custom_extract/$REL_PATH" 0
+          
+          # Additional pass to catch any missed dependencies
+          echo "Running second pass to catch missed dependencies..."
+          find custom_extract -type f -name "*.so" | while read libfile; do
+            process_file "$libfile" 0
+          done
+
+          # Also copy all libraries from vendor/lib and vendor/lib64 that might be needed
+          echo "Copying common vendor libraries..."
+          COMMON_LIBS=("libbase.so" "libcutils.so" "libutils.so" "liblog.so" "libc++.so" "libc.so" "libm.so" "libdl.so" "libhidlbase.so" "libhidltransport.so" "libhwbinder.so" "libbinder.so")
+          
+          for common_lib in "${COMMON_LIBS[@]}"; do
+            if ! grep -q "^$common_lib$" "$LOG" 2>/dev/null; then
+              FOUND=$(find $SEARCH_DIR -type f -name "$common_lib" 2>/dev/null | head -1)
+              if [ -n "$FOUND" ]; then
+                REL=${FOUND#$SEARCH_DIR/}
+                mkdir -p custom_extract/$(dirname "$REL")
+                cp "$FOUND" custom_extract/$REL
+                echo "$common_lib" >> "$LOG"
+                echo "✓ Copied common lib: $REL"
+              fi
+            fi
+          done
+
+          # Find and copy all HAL-related files
+          echo "Searching for HAL files..."
+          find $SEARCH_DIR -type f \( -name "*.hal" -o -name "*manifest*.xml" -o -name "*compatibility*.xml" \) | while read hal_file; do
+            if grep -q "$BIN_NAME" "$hal_file" 2>/dev/null; then
+              REL=${hal_file#$SEARCH_DIR/}
+              mkdir -p custom_extract/$(dirname "$REL")
+              cp "$hal_file" custom_extract/$REL
+              echo "✓ Copied HAL/config: $REL"
+            fi
+          done
 
           # Find .rc file
           RC_FILE=$(find $SEARCH_DIR -type f -name "*.rc" -exec grep -l "$BIN_NAME" {} \; 2>/dev/null | head -1)
@@ -200,7 +293,7 @@ jobs:
             REL=${RC_FILE#$SEARCH_DIR/}
             mkdir -p custom_extract/$(dirname "$REL")
             cp "$RC_FILE" custom_extract/$REL
-            echo "Copied RC file: $REL"
+            echo "✓ Copied RC file: $REL"
           fi
 
           # Find manifest.xml
@@ -209,24 +302,33 @@ jobs:
             REL=${MANIFEST#$SEARCH_DIR/}
             mkdir -p custom_extract/$(dirname "$REL")
             cp "$MANIFEST" custom_extract/$REL
-            echo "Copied manifest.xml: $REL"
+            echo "✓ Copied manifest.xml: $REL"
           fi
 
-          # Also copy any related HAL or service files
-          HAL_FILE=$(find $SEARCH_DIR -type f -name "*.hal" -exec grep -l "$BIN_NAME" {} \; 2>/dev/null | head -1)
-          if [ -n "$HAL_FILE" ]; then
-            REL=${HAL_FILE#$SEARCH_DIR/}
+          # Also copy any vendor.rc or init scripts
+          find $SEARCH_DIR -type f \( -name "init*.rc" -o -name "*.vendor.rc" \) -exec grep -l "$BIN_NAME" {} \; 2>/dev/null | while read rcfile; do
+            REL=${rcfile#$SEARCH_DIR/}
             mkdir -p custom_extract/$(dirname "$REL")
-            cp "$HAL_FILE" custom_extract/$REL
-            echo "Copied HAL file: $REL"
-          fi
+            cp "$rcfile" custom_extract/$REL
+            echo "✓ Copied init script: $REL"
+          done
+
+          # Show what was extracted
+          echo ""
+          echo "=== Extracted files ==="
+          find custom_extract -type f | sort
+          
+          echo ""
+          echo "=== Libraries found ==="
+          cat "$LOG" | sort -u
 
           # Zip everything
           if [ -d "custom_extract" ] && [ "$(ls -A custom_extract)" ]; then
             cd custom_extract
             zip -r ../binary_extract.zip .
             cd ..
-            echo "Done extracting binary and dependencies"
+            echo ""
+            echo "✓ Created binary_extract.zip with $(find custom_extract -type f | wc -l) files"
             ls -lh binary_extract.zip
           else
             echo "No files extracted for binary"
