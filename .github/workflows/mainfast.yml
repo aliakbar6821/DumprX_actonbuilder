@@ -1,4 +1,4 @@
-name: ROM Dumper advance 
+name: ROM Dumper urgent
 
 on:
   workflow_dispatch:
@@ -157,28 +157,35 @@ jobs:
           mkdir -p custom_extract/$(dirname "$REL_PATH")
           cp "$BIN_PATH" custom_extract/$REL_PATH
 
-          # Function to find and copy lib
+          # Function to find and copy lib from DumprX output
           copy_lib() {
             LIB_NAME="$1"
+            # Search in all directories within SEARCH_DIR
             FOUND=$(find $SEARCH_DIR -type f -name "$LIB_NAME" 2>/dev/null | head -1)
             if [ -n "$FOUND" ]; then
               REL=${FOUND#$SEARCH_DIR/}
               mkdir -p custom_extract/$(dirname "$REL")
               cp "$FOUND" custom_extract/$REL
-              echo "Copied lib: $LIB_NAME"
-              echo "$FOUND" >> $LOG
+              echo "Copied lib: $LIB_NAME from $REL"
+              echo "$LIB_NAME" >> $LOG
+              return 0
             fi
+            return 1
           }
 
           # Recursive dependency resolver
           process_file() {
             FILE="$1"
+            echo "Processing dependencies for: $FILE"
             strings "$FILE" | grep -oE '[a-zA-Z0-9._-]+\.so' | sort -u | while read lib; do
-              if ! grep -q "$lib" "$LOG" 2>/dev/null; then
-                copy_lib "$lib"
-                NEW_FILE=$(find custom_extract -name "$lib" | head -1)
-                if [ -n "$NEW_FILE" ]; then
-                  process_file "$NEW_FILE"
+              if ! grep -q "^$lib$" "$LOG" 2>/dev/null; then
+                if copy_lib "$lib"; then
+                  NEW_FILE=$(find custom_extract -name "$lib" | head -1)
+                  if [ -n "$NEW_FILE" ] && [ -f "$NEW_FILE" ]; then
+                    process_file "$NEW_FILE"
+                  fi
+                else
+                  echo "Warning: Library $lib not found for $FILE"
                 fi
               fi
             done
@@ -193,7 +200,7 @@ jobs:
             REL=${RC_FILE#$SEARCH_DIR/}
             mkdir -p custom_extract/$(dirname "$REL")
             cp "$RC_FILE" custom_extract/$REL
-            echo "Copied RC file"
+            echo "Copied RC file: $REL"
           fi
 
           # Find manifest.xml
@@ -202,15 +209,29 @@ jobs:
             REL=${MANIFEST#$SEARCH_DIR/}
             mkdir -p custom_extract/$(dirname "$REL")
             cp "$MANIFEST" custom_extract/$REL
-            echo "Copied manifest.xml"
+            echo "Copied manifest.xml: $REL"
+          fi
+
+          # Also copy any related HAL or service files
+          HAL_FILE=$(find $SEARCH_DIR -type f -name "*.hal" -exec grep -l "$BIN_NAME" {} \; 2>/dev/null | head -1)
+          if [ -n "$HAL_FILE" ]; then
+            REL=${HAL_FILE#$SEARCH_DIR/}
+            mkdir -p custom_extract/$(dirname "$REL")
+            cp "$HAL_FILE" custom_extract/$REL
+            echo "Copied HAL file: $REL"
           fi
 
           # Zip everything
-          cd custom_extract
-          zip -r ../binary_extract.zip .
-          cd ..
-
-          echo "Done extracting binary and dependencies"
+          if [ -d "custom_extract" ] && [ "$(ls -A custom_extract)" ]; then
+            cd custom_extract
+            zip -r ../binary_extract.zip .
+            cd ..
+            echo "Done extracting binary and dependencies"
+            ls -lh binary_extract.zip
+          else
+            echo "No files extracted for binary"
+            exit 1
+          fi
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
@@ -220,23 +241,12 @@ jobs:
           body: |
             Firmware: ${{ github.event.inputs.link }}
             Device: ${{ github.event.inputs.device }}
+            Binary: ${{ github.event.inputs.binary }}
           files: |
             release_files/vendor_build.prop
             release_files/selinux_all.zip
             release_files/odm.zip
             binary_extract.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: dump-${{ github.event.inputs.device }}-${{ github.run_number }}
-          name: "${{ github.event.inputs.device }} vendor dump"
-          body: |
-            Firmware: ${{ github.event.inputs.link }}
-            Device: ${{ github.event.inputs.device }}
-          files: |
-            release_files/vendor_build.prop
-            release_files/selinux_all.zip
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
