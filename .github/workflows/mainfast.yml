@@ -1,4 +1,4 @@
-name: ROM Dumper urgent
+name: ROM Dumper urgent advance 
 
 on:
   workflow_dispatch:
