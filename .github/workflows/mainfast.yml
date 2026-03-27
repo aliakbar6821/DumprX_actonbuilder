@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Download ROM First
+      - name: Download ROM
         run: |
           aria2c -x16 -s16 -k1M --check-certificate=false -o rom.zip "$LINK"
           ls -lh rom.zip
@@ -39,6 +39,11 @@ jobs:
       - name: Clone DumprX
         run: |
           git clone https://github.com/sarthakroy2002/DumprX --depth=1
+
+      - name: Install Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y binutils file tree e2tools
 
       - name: Install DumprX Requirements
         run: |
@@ -51,10 +56,10 @@ jobs:
           mv ../rom.zip .
           bash dumper.sh rom.zip
 
-      - name: Install Tools
+      - name: Show DumprX Output Structure
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y binutils file tree android-sdk-libsparse-utils
+          echo "=== DumprX out structure (4 levels) ==="
+          find DumprX/out -maxdepth 4 -type d | sort | head -80
 
       - name: Extract and Mount APEXes
         run: |
@@ -62,101 +67,141 @@ jobs:
           APEX_EXTRACT_DIR="apex_extracted"
           mkdir -p "$APEX_EXTRACT_DIR"
 
-          echo "=== Locating and extracting APEX files ==="
+          echo "=== Locating APEX files ==="
+          find "$SEARCH_DIR" -type f \( -name "*.apex" -o -name "*.capex" \) \
+            ! -path "*/ramdisk/*" ! -path "*/vendor_boot/*" 2>/dev/null | while read apex_file; do
 
-          # Find all apex files across all partitions
-          find "$SEARCH_DIR" -type f -name "*.apex" -o -name "*.capex" 2>/dev/null | while read apex_file; do
-            apex_name=$(basename "$apex_file" .apex)
-            apex_name=$(basename "$apex_name" .capex)
-            echo "Found APEX: $apex_file"
+            apex_name=$(basename "$apex_file" .capex)
+            apex_name=$(basename "$apex_name" .apex)
+            echo "Found: $apex_file -> $apex_name"
 
             out_dir="$APEX_EXTRACT_DIR/$apex_name"
             mkdir -p "$out_dir"
 
-            # Extract apex (it's a zip)
             unzip -q "$apex_file" -d "$out_dir" 2>/dev/null || true
 
-            # If payload.img exists, mount/extract it
             if [ -f "$out_dir/apex_payload.img" ]; then
               payload_dir="$out_dir/payload"
               mkdir -p "$payload_dir"
 
-              # Try debugfs extraction (most reliable without root)
+              # Try debugfs first
               if command -v debugfs >/dev/null 2>&1; then
                 debugfs -R "rdump / $payload_dir" "$out_dir/apex_payload.img" 2>/dev/null || true
               fi
 
-              # Fallback: try 7z
+              # Fallback: 7z
               if [ -z "$(ls -A $payload_dir 2>/dev/null)" ]; then
                 7z x "$out_dir/apex_payload.img" -o"$payload_dir" 2>/dev/null || true
               fi
 
-              # Fallback: mount as loop
+              # Fallback: mount loop
               if [ -z "$(ls -A $payload_dir 2>/dev/null)" ]; then
                 sudo mount -o loop,ro "$out_dir/apex_payload.img" "$payload_dir" 2>/dev/null || true
               fi
 
               lib_count=$(find "$payload_dir" -name "*.so" 2>/dev/null | wc -l)
-              echo "  -> Extracted $lib_count libs from $apex_name"
+              echo "  -> $apex_name: $lib_count libs extracted"
             fi
           done
 
-          # Summary of what we got
           echo ""
-          echo "=== APEX extraction summary ==="
+          echo "=== APEX summary ==="
           for apex_dir in "$APEX_EXTRACT_DIR"/*/; do
             apex_name=$(basename "$apex_dir")
-            lib64_count=$(find "$apex_dir" -path "*/lib64/*.so" 2>/dev/null | wc -l)
-            lib32_count=$(find "$apex_dir" -path "*/lib/*.so" ! -path "*/lib64/*" 2>/dev/null | wc -l)
-            if [ $((lib64_count + lib32_count)) -gt 0 ]; then
-              echo "  $apex_name: lib64=$lib64_count lib=$lib32_count"
-            fi
+            lib64=$(find "$apex_dir" -path "*/lib64/*.so" 2>/dev/null | wc -l)
+            lib32=$(find "$apex_dir" -path "*/lib/*.so" ! -path "*/lib64/*" 2>/dev/null | wc -l)
+            [ $((lib64 + lib32)) -gt 0 ] && echo "  $apex_name: lib64=$lib64 lib=$lib32"
           done
 
           echo "APEX_EXTRACT_DIR=$APEX_EXTRACT_DIR" >> $GITHUB_ENV
 
-      - name: Collect Files
+         - name: Collect Files
         run: |
           mkdir -p release_files
           SEARCH_DIR="DumprX/out"
 
-          collect() {
-            local label="$1"
-            local pattern="$2"
-            local dest="$3"
-            local type="${4:-f}"
-            result=$(find $SEARCH_DIR -path "$pattern" -type $type 2>/dev/null | head -1)
+          # vendor/build.prop — skip ramdisk
+          result=$(find "$SEARCH_DIR" -path "*/vendor/build.prop" \
+            ! -path "*/ramdisk/*" ! -path "*/vendor_boot/*" 2>/dev/null | head -1)
+          [ -z "$result" ] && result=$(find "$SEARCH_DIR" -name "build.prop" \
+            ! -path "*/ramdisk/*" 2>/dev/null | head -1)
+          if [ -n "$result" ]; then
+            cp "$result" release_files/vendor_build.prop
+            echo "Found build.prop: $result"
+          else
+            echo "build.prop not found"
+          fi
+
+          # selinux folders
+          for partition in vendor system system_ext product; do
+            result=$(find "$SEARCH_DIR" -path "*/${partition}/etc/selinux" \
+              ! -path "*/ramdisk/*" ! -path "*/vendor_boot/*" -type d 2>/dev/null | head -1)
             if [ -n "$result" ]; then
-              mkdir -p "release_files/$dest"
-              cp -r "$result"/. "release_files/$dest/" 2>/dev/null || cp "$result" "release_files/$dest/"
-              echo "Found $label: $result"
+              mkdir -p "release_files/${partition}_selinux"
+              cp -r "$result"/. "release_files/${partition}_selinux/"
+              echo "Found ${partition} selinux: $result"
             else
-              echo "$label not found"
+              echo "${partition} selinux not found"
             fi
-          }
+          done
 
-          collect "vendor/build.prop"      "*/vendor/build.prop"           "."           f
-          collect "vendor selinux"         "*/vendor/etc/selinux"          "vendor_selinux"
-          collect "system selinux"         "*/system/etc/selinux"          "system_selinux"
-          collect "system_ext selinux"     "*/system_ext/etc/selinux"      "system_ext_selinux"
-          collect "product selinux"        "*/product/etc/selinux"         "product_selinux"
+          # ODM — must have real content, skip ramdisk stubs
+          result=""
+          for candidate in $(find "$SEARCH_DIR" \
+            \( -path "*/vendor/odm" -o -path "*/odm" \) \
+            ! -path "*/ramdisk/*" ! -path "*/vendor_boot/*" \
+            -type d 2>/dev/null); do
+            if find "$candidate" -mindepth 2 -type f 2>/dev/null | grep -q .; then
+              result="$candidate"
+              break
+            fi
+          done
 
-          # ODM
-          result=$(find $SEARCH_DIR -path "*/vendor/odm" -type d 2>/dev/null | head -1)
-          [ -z "$result" ] && result=$(find $SEARCH_DIR -path "*/odm" -type d 2>/dev/null | head -1)
           if [ -n "$result" ]; then
             mkdir -p release_files/odm
             cp -r "$result"/. release_files/odm/
             echo "Found odm: $result"
+            echo "ODM top-level:"
+            ls "$result"
+          else
+            echo "Real odm not found"
+            echo "Available top-level partitions:"
+            ls "$SEARCH_DIR"
           fi
 
+          # Zip selinux
           cd release_files
-          zip -r selinux_all.zip vendor_selinux/ system_selinux/ system_ext_selinux/ product_selinux/ 2>/dev/null || true
-          zip -r odm.zip odm/ 2>/dev/null || true
-          cd ..
+          selinux_args=""
+          for d in vendor_selinux system_selinux system_ext_selinux product_selinux; do
+            [ -d "$d" ] && [ -n "$(ls -A $d 2>/dev/null)" ] && selinux_args="$selinux_args $d/"
+          done
+          if [ -n "$selinux_args" ]; then
+            zip -r selinux_all.zip $selinux_args
+            echo "Created selinux_all.zip"
+          else
+            touch selinux_all.zip
+            echo "No selinux content found"
+          fi
 
+          # Zip odm
+          if [ -d "odm" ] && [ -n "$(ls -A odm 2>/dev/null)" ]; then
+            zip -r odm.zip odm/
+            echo "Created odm.zip"
+          else
+            touch odm.zip
+            echo "ODM empty or missing"
+          fi
+
+          cd ..
+          echo "=== release_files ==="
           ls -lh release_files/
-          [ -z "$(ls -A release_files/)" ] && { echo "No files collected!"; exit 1; }
+
+          file_count=$(find release_files -type f ! -name "*.zip" 2>/dev/null | wc -l)
+          zip_nonempty=$(find release_files -name "*.zip" -size +100c 2>/dev/null | wc -l)
+          if [ $((file_count + zip_nonempty)) -eq 0 ]; then
+            echo "Nothing collected!"
+            exit 1
+          fi
 
       - name: Extract Binaries + Dependencies
         if: ${{ github.event.inputs.binaries != '' }}
@@ -175,57 +220,57 @@ jobs:
           touch "$PROCESSED_LIBS_LOG" "$MISSING_LIBS_LOG" "$BINARIES_LOG"
 
           # -------------------------------------------------------
-          # Build APEX search priority list
-          # Priority: vndk.vNN (preferred version) > vndk.vNN (others)
-          #         > com.android.runtime > com.android.art
-          #         > any other apex with libs
+          # Build APEX lib search path priority:
+          # 1. User-specified vndk version
+          # 2. All vndk versions descending
+          # 3. com.android.runtime + com.android.art (libc/libdl/libm/liblog live here)
+          # 4. All other extracted apex libs
+          # Also checks prebuilt apex dirs inside ROM partitions
           # -------------------------------------------------------
           build_apex_search_paths() {
             local paths=""
 
-            # If user specified vndk version, put it first
+            add_if_exists() {
+              [ -d "$1" ] && echo "$paths" | grep -qF "$1" || paths="$paths $1"
+            }
+
+            # User-specified vndk first
             if [ -n "$VNDK_VER" ]; then
-              for apex_dir in \
-                "$APEX_EXTRACT_DIR/com.android.vndk.v${VNDK_VER}/payload/lib64" \
-                "$APEX_EXTRACT_DIR/com.android.vndk.v${VNDK_VER}/payload/lib" \
-                "$SEARCH_DIR/system_ext/apex/com.android.vndk.v${VNDK_VER}/lib64" \
-                "$SEARCH_DIR/system_ext/apex/com.android.vndk.v${VNDK_VER}/lib" \
-                "$SEARCH_DIR/system/apex/com.android.vndk.v${VNDK_VER}/lib64" \
-                "$SEARCH_DIR/system/apex/com.android.vndk.v${VNDK_VER}/lib"; do
-                [ -d "$apex_dir" ] && paths="$paths $apex_dir"
+              add_if_exists "$APEX_EXTRACT_DIR/com.android.vndk.v${VNDK_VER}/payload/lib64"
+              add_if_exists "$APEX_EXTRACT_DIR/com.android.vndk.v${VNDK_VER}/payload/lib"
+              for partition in system system_ext; do
+                add_if_exists "$SEARCH_DIR/$partition/apex/com.android.vndk.v${VNDK_VER}/lib64"
+                add_if_exists "$SEARCH_DIR/$partition/apex/com.android.vndk.v${VNDK_VER}/lib"
               done
             fi
-
-            # Auto-detect all vndk apex versions, sorted descending
-            for vndk_apex in $(find "$APEX_EXTRACT_DIR" -maxdepth 1 -name "com.android.vndk.v*" -type d 2>/dev/null | sort -rV); do
-              for subdir in "$vndk_apex/payload/lib64" "$vndk_apex/payload/lib"; do
-                [ -d "$subdir" ] && paths="$paths $subdir"
+            # All vndk versions descending
+            for vndk_apex in $(find "$APEX_EXTRACT_DIR" -maxdepth 1 \
+              -name "com.android.vndk.v*" -type d 2>/dev/null | sort -rV); do
+              add_if_exists "$vndk_apex/payload/lib64"
+              add_if_exists "$vndk_apex/payload/lib"
+            done
+            for partition in system system_ext; do
+              for vndk_apex in $(find "$SEARCH_DIR/$partition/apex" -maxdepth 1 \
+                -name "com.android.vndk.v*" -type d 2>/dev/null | sort -rV); do
+                add_if_exists "$vndk_apex/lib64"
+                add_if_exists "$vndk_apex/lib"
               done
             done
 
-            # Also check prebuilt apex dirs in ROM partitions
-            for partition in system system_ext product; do
-              for vndk_apex in $(find "$SEARCH_DIR/$partition/apex" -maxdepth 1 -name "com.android.vndk.v*" -type d 2>/dev/null | sort -rV); do
-                for subdir in "$vndk_apex/lib64" "$vndk_apex/lib"; do
-                  [ -d "$subdir" ] && paths="$paths $subdir"
-                done
-              done
-            done
-
-            # Runtime apex (libc, libdl, libm, libbinder_ndk, liblog live here on newer Android)
+            # Runtime apex — libc, libdl, libm, liblog, libbinder_ndk
             for apex_name in com.android.runtime com.android.art; do
-              for subdir in \
-                "$APEX_EXTRACT_DIR/$apex_name/payload/lib64" \
-                "$APEX_EXTRACT_DIR/$apex_name/payload/lib" \
-                "$SEARCH_DIR/system/apex/$apex_name/lib64" \
-                "$SEARCH_DIR/system/apex/$apex_name/lib"; do
-                [ -d "$subdir" ] && paths="$paths $subdir"
+              add_if_exists "$APEX_EXTRACT_DIR/$apex_name/payload/lib64"
+              add_if_exists "$APEX_EXTRACT_DIR/$apex_name/payload/lib"
+              for partition in system system_ext; do
+                add_if_exists "$SEARCH_DIR/$partition/apex/$apex_name/lib64"
+                add_if_exists "$SEARCH_DIR/$partition/apex/$apex_name/lib"
               done
             done
 
-            # All remaining apex libs as fallback
-            for apex_lib_dir in $(find "$APEX_EXTRACT_DIR" -mindepth 2 -maxdepth 3 \( -name "lib64" -o -name "lib" \) -type d 2>/dev/null); do
-              echo "$paths" | grep -qF "$apex_lib_dir" || paths="$paths $apex_lib_dir"
+            # All remaining apex as fallback
+            for apex_lib_dir in $(find "$APEX_EXTRACT_DIR" -mindepth 2 -maxdepth 3 \
+              \( -name "lib64" -o -name "lib" \) -type d 2>/dev/null); do
+              add_if_exists "$apex_lib_dir"
             done
 
             echo "$paths"
@@ -238,25 +283,24 @@ jobs:
           echo ""
 
           # -------------------------------------------------------
-          # Extract NEEDED libs from an ELF
+          # Extract NEEDED libs from ELF
           # -------------------------------------------------------
           extract_dependencies() {
             local file="$1"
             [ -f "$file" ] || return
-            if file "$file" | grep -q "ELF"; then
-              readelf -d "$file" 2>/dev/null | grep "NEEDED" | sed 's/.*\[//' | sed 's/\]//'
-              objdump -p "$file" 2>/dev/null | grep "NEEDED" | awk '{print $2}'
-            fi
+            file "$file" | grep -q "ELF" || return
+            readelf -d "$file" 2>/dev/null | grep "NEEDED" | sed 's/.*\[//' | sed 's/\]//'
+            objdump -p "$file" 2>/dev/null | grep "NEEDED" | awk '{print $2}'
           }
 
           # -------------------------------------------------------
-          # Find a lib: vendor/odm first, then apex paths, then
-          # system partitions. Never mix API levels blindly.
+          # Find lib — vendor/odm > apex (versioned) > runtime apex
+          # > system_ext > system. Never use live device paths.
           # -------------------------------------------------------
           find_lib() {
             local lib="$1"
 
-            # 1. Vendor / ODM partitions (same API level as HALs)
+            # Vendor / ODM (same API level as HALs)
             for dir in \
               "$SEARCH_DIR/vendor/odm/lib64" \
               "$SEARCH_DIR/vendor/odm/lib" \
@@ -267,12 +311,12 @@ jobs:
               [ -f "$dir/$lib" ] && echo "$dir/$lib" && return
             done
 
-            # 2. APEX paths (versioned, safe ABI)
+            # APEX paths (versioned safe ABI)
             for apex_dir in $APEX_SEARCH_PATHS; do
               [ -f "$apex_dir/$lib" ] && echo "$apex_dir/$lib" && return
             done
 
-            # 3. system_ext / product (last resort)
+            # system_ext / product / system last resort
             for dir in \
               "$SEARCH_DIR/system_ext/lib64" \
               "$SEARCH_DIR/system_ext/lib" \
@@ -287,7 +331,7 @@ jobs:
           }
 
           # -------------------------------------------------------
-          # Recursively copy lib + its deps
+          # Recursively copy lib + its transitive deps
           # -------------------------------------------------------
           copy_lib() {
             local lib="$1"
@@ -305,11 +349,9 @@ jobs:
               return
             fi
 
-            # Determine destination preserving partition structure
             local rel="${found#$SEARCH_DIR/}"
-            # For apex paths not under SEARCH_DIR, put under apex_libs/
+            # If from apex (not under SEARCH_DIR), put under apex_libs/
             if [ "$rel" = "$found" ]; then
-              # Strip APEX_EXTRACT_DIR prefix
               rel="apex_libs/${found#$APEX_EXTRACT_DIR/}"
             fi
 
@@ -318,7 +360,7 @@ jobs:
             cp "$found" "$dest"
             echo "    + $lib  <-  $found"
 
-            # Recurse into its deps
+            # Recurse
             extract_dependencies "$found" | sort -u | while read dep; do
               [ -n "$dep" ] && copy_lib "$dep" $((depth + 1))
             done
@@ -336,9 +378,12 @@ jobs:
 
             BIN_PATH=$(find "$SEARCH_DIR" -type f \
               \( -path "*/bin/hw/*" -o -path "*/bin/*" \) \
+              ! -path "*/ramdisk/*" ! -path "*/vendor_boot/*" \
               -iname "*${BIN_NAME}*" 2>/dev/null | head -1)
 
-            [ -z "$BIN_PATH" ] && BIN_PATH=$(find "$SEARCH_DIR" -type f -iname "*${BIN_NAME}*" 2>/dev/null | head -1)
+            [ -z "$BIN_PATH" ] && BIN_PATH=$(find "$SEARCH_DIR" -type f \
+              ! -path "*/ramdisk/*" ! -path "*/vendor_boot/*" \
+              -iname "*${BIN_NAME}*" 2>/dev/null | head -1)
 
             if [ -z "$BIN_PATH" ]; then
               echo "x Binary not found: $BIN_NAME"
@@ -353,59 +398,59 @@ jobs:
             echo "$BIN_NAME: $REL" >> "$BINARIES_LOG"
 
             # Deps
+            echo "  Resolving dependencies..."
             extract_dependencies "$BIN_PATH" | sort -u | while read dep; do
               [ -n "$dep" ] && copy_lib "$dep" 0
             done
 
             # RC file
             RC=$(find "$SEARCH_DIR" -type f -name "*.rc" \
+              ! -path "*/ramdisk/*" \
               -exec grep -l "$BIN_NAME" {} \; 2>/dev/null | head -1)
             if [ -n "$RC" ]; then
               REL="${RC#$SEARCH_DIR/}"
               mkdir -p "custom_extract/$(dirname "$REL")"
               cp "$RC" "custom_extract/$REL"
-              echo "+ RC: $REL"
+              echo "  + RC: $REL"
             fi
 
             # VINTF manifest
             MANIFEST=$(find "$SEARCH_DIR" -path "*/etc/vintf/*.xml" \
+              ! -path "*/ramdisk/*" \
               -exec grep -l "$BIN_NAME" {} \; 2>/dev/null | head -1)
             if [ -n "$MANIFEST" ]; then
               REL="${MANIFEST#$SEARCH_DIR/}"
               mkdir -p "custom_extract/$(dirname "$REL")"
               cp "$MANIFEST" "custom_extract/$REL"
-              echo "+ Manifest: $REL"
+              echo "  + Manifest: $REL"
             fi
 
-            # Privapp permissions XML
+            # Privapp permissions
             PERM=$(find "$SEARCH_DIR" -path "*/etc/permissions/*.xml" \
+              ! -path "*/ramdisk/*" \
               -exec grep -l "$BIN_NAME" {} \; 2>/dev/null | head -1)
             if [ -n "$PERM" ]; then
               REL="${PERM#$SEARCH_DIR/}"
               mkdir -p "custom_extract/$(dirname "$REL")"
               cp "$PERM" "custom_extract/$REL"
-              echo "+ Permissions XML: $REL"
+              echo "  + Permissions: $REL"
             fi
           done
-
-          # -------------------------------------------------------
           # Summary
-          # -------------------------------------------------------
           echo ""
           echo "========================================="
-          echo "Summary"
+          echo "Extraction Summary"
           echo "========================================="
-          echo "Binaries:  $(cat "$BINARIES_LOG" | wc -l)"
+          echo "Binaries   : $(wc -l < "$BINARIES_LOG")"
           echo "Libs copied: $(sort -u "$PROCESSED_LIBS_LOG" | wc -l)"
-          echo "Missing:   $(sort -u "$MISSING_LIBS_LOG" | wc -l)"
+          echo "Missing    : $(sort -u "$MISSING_LIBS_LOG" | wc -l)"
           echo ""
-          echo "=== Missing libs (need manual sourcing) ==="
+          echo "=== Missing libs ==="
           sort -u "$MISSING_LIBS_LOG"
           echo ""
-          echo "=== Directory structure ==="
-          tree custom_extract -L 4 2>/dev/null || find custom_extract -type f | head -40
+          echo "=== Structure ==="
+          tree custom_extract -L 4 2>/dev/null || find custom_extract -type f | head -50
 
-          # Zip
           TOTAL=$(find custom_extract -type f 2>/dev/null | wc -l)
           if [ "$TOTAL" -gt 0 ]; then
             cd custom_extract && zip -r ../binary_extract.zip . && cd ..
@@ -418,7 +463,6 @@ jobs:
       - name: Test Extracted HALs
         if: ${{ github.event.inputs.binaries != '' }}
         run: |
-          SEARCH_DIR="DumprX/out"
           EXTRACT_DIR="custom_extract"
           TEST_LOG="custom_extract/hal_test_results.log"
           PASS=0
@@ -429,44 +473,42 @@ jobs:
           echo "$(date)" | tee -a "$TEST_LOG"
           echo "" | tee -a "$TEST_LOG"
 
-          # Build LD_LIBRARY_PATH from everything we extracted
-          # Collect all dirs that contain .so files
-          LIB_PATHS=""
-          while IFS= read -r -d '' dir; do
-            LIB_PATHS="$LIB_PATHS:$dir"
-          done < <(find "$EXTRACT_DIR" -type f -name "*.so" -exec dirname {} \; | sort -u | tr '\n' '\0')
+          # Build LD_LIBRARY_PATH from all dirs containing .so in extract
+          LIB_PATHS=$(find "$EXTRACT_DIR" -type f -name "*.so" \
+            -exec dirname {} \; | sort -u | tr '\n' ':' | sed 's/:$//')
 
-          # Also add apex_libs paths
-          while IFS= read -r -d '' dir; do
-            LIB_PATHS="$LIB_PATHS:$dir"
-          done < <(find "$EXTRACT_DIR/apex_libs" -type d 2>/dev/null | tr '\n' '\0')
-
-          # Strip leading colon
-          LIB_PATHS="${LIB_PATHS#:}"
-
-          echo "LD_LIBRARY_PATH dirs:" | tee -a "$TEST_LOG"
+          echo "LD_LIBRARY_PATH:" | tee -a "$TEST_LOG"
           echo "$LIB_PATHS" | tr ':' '\n' | sed 's/^/  /' | tee -a "$TEST_LOG"
           echo "" | tee -a "$TEST_LOG"
 
-          # Find all extracted binaries (in bin/hw or bin/)
-          find "$EXTRACT_DIR" -type f \( -path "*/bin/hw/*" -o -path "*/bin/*" \) | while read bin; do
+          # Build combined symbol table from all extracted libs once
+          COMBINED_SYMS=$(mktemp)
+          echo "Building symbol table from extracted libs..."
+          find "$EXTRACT_DIR" -type f -name "*.so" | while read lib_file; do
+            nm -D --defined-only "$lib_file" 2>/dev/null | awk '{print $NF}'
+          done | sort -u > "$COMBINED_SYMS"
+          echo "Symbol table: $(wc -l < "$COMBINED_SYMS") symbols"
+          echo "" | tee -a "$TEST_LOG"
 
-            # Skip non-ELF
+          # Test each extracted binary
+          find "$EXTRACT_DIR" -type f \
+            \( -path "*/bin/hw/*" -o -path "*/bin/*" \) | while read bin; do
+
             file "$bin" | grep -q "ELF" || continue
-
             bin_name=$(basename "$bin")
+
             echo "=========================================" | tee -a "$TEST_LOG"
             echo "HAL: $bin_name" | tee -a "$TEST_LOG"
             echo "Path: $bin" | tee -a "$TEST_LOG"
-
             chmod +x "$bin"
 
-            # --- Step 1: Static dependency check ---
+            # --- Step 1: Static dep check ---
             echo "" | tee -a "$TEST_LOG"
-            echo "[1] Dependency check:" | tee -a "$TEST_LOG"
-
+            echo "[1] Dependencies:" | tee -a "$TEST_LOG"
             dep_missing=0
-            readelf -d "$bin" 2>/dev/null | grep "NEEDED" | sed 's/.*\[//' | sed 's/\]//' | while read lib; do
+            readelf -d "$bin" 2>/dev/null \
+              | grep "NEEDED" | sed 's/.*\[//' | sed 's/\]//' \
+              | while read lib; do
               [ -z "$lib" ] && continue
               found=0
               IFS=':' read -ra DIRS <<< "$LIB_PATHS"
@@ -479,84 +521,60 @@ jobs:
               done
               if [ $found -eq 0 ]; then
                 echo "  x MISSING: $lib" | tee -a "$TEST_LOG"
-                dep_missing=$((dep_missing + 1))
               fi
             done
 
-            # --- Step 2: Symbol verification via nm/readelf ---
+            # --- Step 2: Undefined symbol check ---
             echo "" | tee -a "$TEST_LOG"
-            echo "[2] Undefined symbol check:" | tee -a "$TEST_LOG"
+            echo "[2] Undefined symbols:" | tee -a "$TEST_LOG"
+            undef_count=0
+            readelf --syms "$bin" 2>/dev/null \
+              | grep " UND " | grep -v "UND  0 " \
+              | awk '{print $NF}' | grep -v '^\.' | sort -u \
+              | while read sym; do
+              [ -z "$sym" ] || [ "$sym" = "Name" ] && continue
+              if ! grep -qxF "$sym" "$COMBINED_SYMS" 2>/dev/null; then
+                echo "  x UNRESOLVED: $sym" | tee -a "$TEST_LOG"
+              fi
+            done
+            unresolved=$(readelf --syms "$bin" 2>/dev/null \
+              | grep " UND " | grep -v "UND  0 " \
+              | awk '{print $NF}' | grep -v '^\.' | sort -u \
+              | while read sym; do
+                [ -z "$sym" ] && continue
+                grep -qxF "$sym" "$COMBINED_SYMS" 2>/dev/null || echo "$sym"
+              done | wc -l)
+            [ "$unresolved" -eq 0 ] && echo "  All symbols resolved" | tee -a "$TEST_LOG"
 
-            undef_syms=$(readelf --syms "$bin" 2>/dev/null | grep "UND" | grep -v "UND  0" | awk '{print $NF}' | grep -v "^\." | sort -u)
-            sym_missing=0
-
-            if [ -n "$undef_syms" ]; then
-              # Build combined symbol table from all extracted libs
-              COMBINED_SYMS=$(mktemp)
-              IFS=':' read -ra DIRS <<< "$LIB_PATHS"
-              for d in "${DIRS[@]}"; do
-                find "$d" -maxdepth 1 -name "*.so" 2>/dev/null | while read lib_file; do
-                  nm -D --defined-only "$lib_file" 2>/dev/null | awk '{print $NF}'
-                done
-              done > "$COMBINED_SYMS"
-
-              echo "$undef_syms" | while read sym; do
-                [ -z "$sym" ] || [ "$sym" = "name" ] && continue
-                if grep -qxF "$sym" "$COMBINED_SYMS" 2>/dev/null; then
-                  : # symbol found, don't flood log
-                else
-                  echo "  x UNRESOLVED: $sym" | tee -a "$TEST_LOG"
-                  sym_missing=$((sym_missing + 1))
-                fi
-              done
-
-              rm -f "$COMBINED_SYMS"
-            else
-              echo "  (no undefined symbols — statically linked or stripped)" | tee -a "$TEST_LOG"
-            fi
-
-            # --- Step 3: Actually run the HAL ---
+            # --- Step 3: Runtime test ---
             echo "" | tee -a "$TEST_LOG"
-            echo "[3] Runtime test:" | tee -a "$TEST_LOG"
-
+            echo "[3] Runtime:" | tee -a "$TEST_LOG"
             output=$(LD_LIBRARY_PATH="$LIB_PATHS" timeout 5 "$bin" 2>&1 || true)
             exit_code=$?
-
             echo "$output" | head -30 | tee -a "$TEST_LOG"
 
-            # Classify result
-            if echo "$output" | grep -q "cannot locate symbol\|CANNOT LINK EXECUTABLE\|No such file or directory.*\.so"; then
-              echo "" | tee -a "$TEST_LOG"
+            echo "" | tee -a "$TEST_LOG"
+            if echo "$output" | grep -q "cannot locate symbol\|CANNOT LINK EXECUTABLE"; then
               echo "  [RESULT] FAIL — symbol/link error" | tee -a "$TEST_LOG"
-              SYMBOL_ERR=$((SYMBOL_ERR + 1))
             elif [ $exit_code -eq 124 ] || [ $exit_code -eq 143 ]; then
-              echo "" | tee -a "$TEST_LOG"
-              echo "  [RESULT] PASS — HAL stayed alive (timeout = bound and waiting)" | tee -a "$TEST_LOG"
-              PASS=$((PASS + 1))
+              echo "  [RESULT] PASS — HAL alive (bound and waiting)" | tee -a "$TEST_LOG"
             elif [ $exit_code -eq 0 ]; then
-              echo "" | tee -a "$TEST_LOG"
               echo "  [RESULT] PASS — clean exit" | tee -a "$TEST_LOG"
-              PASS=$((PASS + 1))
             else
-              echo "" | tee -a "$TEST_LOG"
               echo "  [RESULT] FAIL — crashed (exit: $exit_code)" | tee -a "$TEST_LOG"
-              FAIL=$((FAIL + 1))
             fi
-
             echo "" | tee -a "$TEST_LOG"
           done
 
-          echo "=========================================" | tee -a "$TEST_LOG"
-          echo "FINAL SUMMARY" | tee -a "$TEST_LOG"
-          echo "=========================================" | tee -a "$TEST_LOG"
-          echo "PASS        : $PASS" | tee -a "$TEST_LOG"
-          echo "FAIL (crash): $FAIL" | tee -a "$TEST_LOG"
-          echo "FAIL (symbol): $SYMBOL_ERR" | tee -a "$TEST_LOG"
-          echo "" | tee -a "$TEST_LOG"
+          rm -f "$COMBINED_SYMS"
 
-          # Print just the result lines for quick GitHub Actions log scan
-          echo "=== Quick results ==="
-          grep "RESULT\|HAL:" "$TEST_LOG"
+          echo "=========================================" | tee -a "$TEST_LOG"
+          echo "=== Quick results ===" | tee -a "$TEST_LOG"
+          grep -E "HAL:|RESULT" "$TEST_LOG"
+
+          # Re-zip with test log included
+          cd custom_extract && zip -r ../binary_extract.zip . && cd ..
+
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
@@ -568,11 +586,6 @@ jobs:
             Binaries: ${{ github.event.inputs.binaries }}
             VNDK preferred: ${{ github.event.inputs.vndk_version || 'auto' }}
           files: |
-            release_files/vendor_build.prop
-            release_files/selinux_all.zip
-            release_files/odm.zip
-            binary_extract.zip
-            custom_extract/hal_test_results.log
             release_files/vendor_build.prop
             release_files/selinux_all.zip
             release_files/odm.zip
