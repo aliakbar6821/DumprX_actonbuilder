@@ -1,0 +1,38 @@
+name: direct Gofile
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Direct download URL'
+        required: true
+      filename:
+        description: 'Output filename (e.g. rom.zip)'
+        required: false
+        default: 'rom.zip'
+
+jobs:
+  upload:
+    runs-on: ubuntu-22.04
+    steps:
+
+      - name: Download file with aria2
+        run: |
+          sudo apt install -y aria2
+          aria2c -x16 -s16 -k1M --check-certificate=false \
+            -o "${{ github.event.inputs.filename }}" \
+            "${{ github.event.inputs.url }}"
+          ls -lh "${{ github.event.inputs.filename }}"
+
+      - name: Clone GoFile Upload script
+        run: |
+          git clone https://github.com/Sushrut1101/GoFile-Upload --depth=1
+          chmod +x GoFile-Upload/upload.sh
+
+      - name: Upload to GoFile
+        run: |
+          cd GoFile-Upload
+          bash upload.sh "../${{ github.event.inputs.filename }}" | tee /tmp/gofile_result.txt
+          echo ""
+          echo "=== GoFile Upload Result ==="
+          cat /tmp/gofile_result.txt
