@@ -112,6 +112,17 @@ jobs:
           echo "=== Check dependencies (32-bit) ==="
           readelf -d build/lib/libmmlistparser.so | grep NEEDED || true
 
+      - name: Get version from tag or branch
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION="build-$(date +%Y%m%d-%H%M%S)"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
       - name: Create installation script
         run: |
           cat > build/install_stubs.sh << 'EOF'
@@ -119,7 +130,7 @@ jobs:
           # ColorOS Audio Stub Installer (Auto-generated)
           # Run as root after booting ColorOS
           
-          echo "=== ColorOS Audio Stub Installer v${{ github.ref_name }} ==="
+          echo "=== ColorOS Audio Stub Installer ${{ steps.version.outputs.version }} ==="
           
           if [ "$(id -u)" != "0" ]; then
              echo "ERROR: Must run as root (use 'su' first)"
@@ -170,7 +181,7 @@ jobs:
           cat > build/README.md << 'EOF'
           # ColorOS Audio Stub Package
           
-          **Version:** ${{ github.ref_name }}  
+          **Version:** ${{ steps.version.outputs.version }}  
           **Build Date:** $(date -u)
           
           ## What This Fixes
@@ -255,15 +266,23 @@ jobs:
       - name: Package release
         run: |
           cd build
-          zip -r ../coloros-audio-stubs-${{ github.ref_name }}.zip lib64/ lib/ install_stubs.sh README.md
+          zip -r ../coloros-audio-stubs-${{ steps.version.outputs.version }}.zip lib64/ lib/ install_stubs.sh README.md
 
-      - name: Create Release
+      - name: Upload artifacts (for non-tag builds)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coloros-audio-stubs-${{ steps.version.outputs.version }}
+          path: coloros-audio-stubs-${{ steps.version.outputs.version }}.zip
+
+      - name: Create Release (for tag builds)
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            coloros-audio-stubs-${{ github.ref_name }}.zip
+            coloros-audio-stubs-${{ steps.version.outputs.version }}.zip
           body: |
-            ## ColorOS Audio Stub Package ${{ github.ref_name }}
+            ## ColorOS Audio Stub Package ${{ steps.version.outputs.version }}
             
             **Fixes 5-second audio delays** on ColorOS/OxygenOS/RealmeUI Android 14/15/16 when using AOSP vendor.
             
@@ -275,7 +294,7 @@ jobs:
             
             ### Quick Install
             ```bash
-            # Download and extract coloros-audio-stubs-${{ github.ref_name }}.zip to /sdcard/
+            # Download and extract coloros-audio-stubs-${{ steps.version.outputs.version }}.zip to /sdcard/
             adb shell
             su
             cd /sdcard/coloros-audio-stubs
