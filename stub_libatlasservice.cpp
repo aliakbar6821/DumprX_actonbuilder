@@ -1,5 +1,5 @@
 // =============================================================================
-// stub_libatlasservice.cpp — Stub for libatlasservice.so (not libiatlasservice!)
+// stub_libatlasservice.cpp — Stub for libatlasservice.so
 //
 // BUILD:
 //   64-bit:
@@ -109,18 +109,9 @@ int BnAtlasService::onTransact(uint32_t, const void*, void*, uint32_t) {
 #pragma GCC visibility pop
 
 // =============================================================================
-// extern "C" section
+// extern "C" section — only symbols that compiler can't generate
 // =============================================================================
 extern "C" {
-
-// ── Vtable thunks ─────────────────────────────────────────────────────────
-__attribute__((visibility("default")))
-void _ZN7android13IAtlasServiceD0Ev(void* thiz) {
-    ::operator delete(thiz);
-}
-
-__attribute__((visibility("default")))
-void _ZN7android13IAtlasServiceD1Ev(void* /*thiz*/) {}
 
 // ── BnAtlasService thunks ─────────────────────────────────────────────────
 __attribute__((visibility("default")))
@@ -138,11 +129,14 @@ int _ZThn8_N7android14BnAtlasService10onTransactEjRKNS_6ParcelEPS1_j(
 }
 
 // ── DisplayKevent constructor ─────────────────────────────────────────────
-// Mangled: DisplayKevent::DisplayKevent(void*, char const*, bool (*)(void*, mm_kevent_packet*))
 __attribute__((visibility("default")))
 void _ZN7android13DisplayKeventC1EPvPKcPFbS1_PNS_16mm_kevent_packetEE(
     void* /*thiz*/, void* /*arg1*/, const char* /*arg2*/, void* /*callback*/) {
-    // Do nothing
+}
+
+__attribute__((visibility("default")))
+void _ZN7android13DisplayKeventC2EPvPKcPFbS1_PNS_16mm_kevent_packetEE(
+    void* /*thiz*/, void* /*arg1*/, const char* /*arg2*/, void* /*callback*/) {
 }
 
 } // extern "C"
