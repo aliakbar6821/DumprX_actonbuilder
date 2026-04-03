@@ -1,18 +1,5 @@
 // =============================================================================
 // stub_libimmlistservice.cpp — ABI-compatible stub for libimmlistservice.so
-//
-// BUILD:
-//   64-bit:
-//     clang++ -shared -fPIC -std=c++17 \
-//       -Wl,--soname,libimmlistservice.so \
-//       -nostdlib++ -fno-exceptions -fno-rtti -O1 \
-//       -o libimmlistservice.so stub_libimmlistservice.cpp
-//
-//   32-bit:
-//     armv7a-linux-androideabi21-clang++ -shared -fPIC -std=c++17 \
-//       -Wl,--soname,libimmlistservice.so \
-//       -nostdlib++ -fno-exceptions -fno-rtti -O1 \
-//       -o libimmlistservice.so stub_libimmlistservice.cpp
 // =============================================================================
 
 #include <cstdlib>
@@ -21,7 +8,7 @@
 #include <cstddef>
 
 // =============================================================================
-// Custom new/delete operators (avoid libc++ dependency)
+// Custom new/delete operators
 // =============================================================================
 void* operator new(std::size_t size) {
     return malloc(size);
@@ -63,10 +50,7 @@ namespace android {
 class String8;
 
 // =============================================================================
-// Mutex stub — just enough bytes so Singleton<T>::sLock is a valid object.
-// Android's Mutex is typically a pthread_mutex_t wrapper (~40 bytes on LP64).
-// We provide a 64-byte zero-initialized block which is safe for
-// PTHREAD_MUTEX_INITIALIZER (all zeros = valid unlocked mutex on Bionic).
+// Mutex stub
 // =============================================================================
 class Mutex {
 public:
@@ -157,7 +141,7 @@ void* ListServiceUtils::getUidPackageNameMap()   { return nullptr; }
 void  ListServiceUtils::clearAppVolumePackageSet() {}
 
 // =============================================================================
-// Singleton<ListServiceUtils> — MUST export sLock and sInstance
+// Singleton<ListServiceUtils>
 // =============================================================================
 template<typename T> class Singleton;
 
@@ -169,12 +153,10 @@ public:
     static ListServiceUtils& getInstance();
     static bool hasInstance();
 
-    // *** CRITICAL: These static data members must be exported ***
     static Mutex sLock;
     static ListServiceUtils* sInstance;
 };
 
-// *** CRITICAL: Define the static members at namespace scope ***
 Mutex Singleton<ListServiceUtils>::sLock;
 ListServiceUtils* Singleton<ListServiceUtils>::sInstance = nullptr;
 
@@ -192,19 +174,26 @@ ListServiceUtils& Singleton<ListServiceUtils>::getInstance() {
 bool Singleton<ListServiceUtils>::hasInstance() { return sInstance != nullptr; }
 
 // =============================================================================
-// AtlasEventUploadUtils — needed by surfaceflinger via liboplus_display_watchcall.so
+// AtlasEventUploadUtils — with setEvent method (CRITICAL FIX)
 // =============================================================================
 class AtlasEventUploadUtils {
 public:
     AtlasEventUploadUtils();
     virtual ~AtlasEventUploadUtils();
+
+    // THE MISSING SYMBOL:
+    // _ZN7android21AtlasEventUploadUtils8setEventERKNS_7String8ES3_
+    // Demangled: android::AtlasEventUploadUtils::setEvent(
+    //              android::String8 const&, android::String8 const&)
+    static void setEvent(const String8& /*key*/, const String8& /*value*/);
 };
 
 AtlasEventUploadUtils::AtlasEventUploadUtils()  {}
 AtlasEventUploadUtils::~AtlasEventUploadUtils() {}
+void AtlasEventUploadUtils::setEvent(const String8&, const String8&) {}
 
 // =============================================================================
-// Singleton<AtlasEventUploadUtils> — MUST export sLock and sInstance
+// Singleton<AtlasEventUploadUtils>
 // =============================================================================
 template<>
 class Singleton<AtlasEventUploadUtils> {
@@ -214,12 +203,10 @@ public:
     static AtlasEventUploadUtils& getInstance();
     static bool hasInstance();
 
-    // *** CRITICAL: These static data members must be exported ***
     static Mutex sLock;
     static AtlasEventUploadUtils* sInstance;
 };
 
-// *** CRITICAL: Define the static members at namespace scope ***
 Mutex Singleton<AtlasEventUploadUtils>::sLock;
 AtlasEventUploadUtils* Singleton<AtlasEventUploadUtils>::sInstance = nullptr;
 
@@ -237,7 +224,7 @@ AtlasEventUploadUtils& Singleton<AtlasEventUploadUtils>::getInstance() {
 bool Singleton<AtlasEventUploadUtils>::hasInstance() { return sInstance != nullptr; }
 
 // =============================================================================
-// IMMListService — binder interface stub
+// IMMListService
 // =============================================================================
 class IMMListService {
 public:
@@ -292,79 +279,74 @@ BpMMListService::~BpMMListService() {}
 #pragma GCC visibility pop
 
 // =============================================================================
-// extern "C" section — mangled names for symbols compiler can't generate
+// extern "C" section
 // =============================================================================
 extern "C" {
 
-// ── String8-taking ListServiceUtils methods ────────────────────────────────
 __attribute__((visibility("default")))
 void _ZN7android16ListServiceUtils16addUidPackageMapENS_7String8E(
-    void* /*this*/, void* /*string8*/) {}
+    void*, void*) {}
 
 __attribute__((visibility("default")))
 void _ZN7android16ListServiceUtils19removeUidPackageMapENS_7String8E(
-    void* /*this*/, void* /*string8*/) {}
+    void*, void*) {}
 
 __attribute__((visibility("default")))
 void _ZN7android16ListServiceUtils19updateUidPackageMapENS_7String8E(
-    void* /*this*/, void* /*string8*/) {}
+    void*, void*) {}
 
 __attribute__((visibility("default")))
 void _ZN7android16ListServiceUtils22addAppVolumePackageSetENS_7String8E(
-    void* /*this*/, void* /*string8*/) {}
+    void*, void*) {}
 
-// ── Vtable thunks ─────────────────────────────────────────────────────────
 __attribute__((visibility("default")))
 void _ZTv0_n24_N7android16ListServiceUtilsD0Ev(void* thiz) {
     ::operator delete(thiz);
 }
 __attribute__((visibility("default")))
-void _ZTv0_n24_N7android16ListServiceUtilsD1Ev(void* /*thiz*/) {}
+void _ZTv0_n24_N7android16ListServiceUtilsD1Ev(void*) {}
 
 __attribute__((visibility("default")))
 void _ZTv0_n24_N7android14IMMListServiceD0Ev(void* thiz) {
     ::operator delete(thiz);
 }
 __attribute__((visibility("default")))
-void _ZTv0_n24_N7android14IMMListServiceD1Ev(void* /*thiz*/) {}
+void _ZTv0_n24_N7android14IMMListServiceD1Ev(void*) {}
 
 __attribute__((visibility("default")))
 void _ZTv0_n24_N7android15BpMMListServiceD0Ev(void* thiz) {
     ::operator delete(thiz);
 }
 __attribute__((visibility("default")))
-void _ZTv0_n24_N7android15BpMMListServiceD1Ev(void* /*thiz*/) {}
+void _ZTv0_n24_N7android15BpMMListServiceD1Ev(void*) {}
 
 __attribute__((visibility("default")))
 void _ZThn8_N7android15BpMMListServiceD0Ev(void* thiz) {
     ::operator delete(static_cast<char*>(thiz) - 8);
 }
 __attribute__((visibility("default")))
-void _ZThn8_N7android15BpMMListServiceD1Ev(void* /*thiz*/) {}
+void _ZThn8_N7android15BpMMListServiceD1Ev(void*) {}
 
 __attribute__((visibility("default")))
 int _ZThn8_N7android15BnMMListService10onTransactEjRKNS_6ParcelEPS1_j(
-    void* /*thiz*/, uint32_t /*code*/, const void* /*data*/,
-    void* /*reply*/, uint32_t /*flags*/) {
+    void*, uint32_t, const void*, void*, uint32_t) {
     return -1;
 }
 
 __attribute__((visibility("default")))
-void _ZN7android14IMMListService14setDefaultImplENS_2spIS0_EE(void* /*thiz*/, void* /*sp*/) {}
+void _ZN7android14IMMListService14setDefaultImplENS_2spIS0_EE(void*, void*) {}
 
 __attribute__((visibility("default")))
 int _ZN7android15BnMMListService10onTransactEjRKNS_6ParcelEPS1_j(
-    void* /*thiz*/, uint32_t /*code*/, const void* /*data*/,
-    void* /*reply*/, uint32_t /*flags*/) {
+    void*, uint32_t, const void*, void*, uint32_t) {
     return -1;
 }
 
-// ── AtlasEventUploadUtils vtable thunks ───────────────────────────────────
 __attribute__((visibility("default")))
 void _ZTv0_n24_N7android21AtlasEventUploadUtilsD0Ev(void* thiz) {
     ::operator delete(thiz);
 }
 __attribute__((visibility("default")))
-void _ZTv0_n24_N7android21AtlasEventUploadUtilsD1Ev(void* /*thiz*/) {}
+void _ZTv0_n24_N7android21AtlasEventUploadUtilsD1Ev(void*) {}
 
 } // extern "C"
