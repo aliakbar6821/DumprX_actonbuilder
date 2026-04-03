@@ -52,54 +52,45 @@ jobs:
           result=$(find $SEARCH_DIR -path "*/vendor/build.prop" 2>/dev/null | head -1)
           if [ -n "$result" ]; then
             cp "$result" release_files/vendor_build.prop
-            echo "Found: $result"
+            echo "✅ Found vendor/build.prop"
           else
-            echo "vendor/build.prop not found"
+            echo "❌ vendor/build.prop not found"
           fi
 
-          # vendor selinux folder
+          # vendor selinux
           result=$(find $SEARCH_DIR -path "*/vendor/etc/selinux" -type d 2>/dev/null | head -1)
           if [ -n "$result" ]; then
             mkdir -p release_files/vendor_selinux
             cp -r "$result"/. release_files/vendor_selinux/
-            echo "Found vendor selinux: $result"
-          else
-            echo "vendor selinux not found"
+            echo "✅ Found vendor selinux"
           fi
 
-          # system selinux folder
+          # system selinux
           result=$(find $SEARCH_DIR -path "*/system/etc/selinux" -type d 2>/dev/null | head -1)
           if [ -n "$result" ]; then
             mkdir -p release_files/system_selinux
             cp -r "$result"/. release_files/system_selinux/
-            echo "Found system selinux: $result"
-          else
-            echo "system selinux not found"
+            echo "✅ Found system selinux"
           fi
 
-          # system_ext selinux folder
+          # system_ext selinux
           result=$(find $SEARCH_DIR -path "*/system_ext/etc/selinux" -type d 2>/dev/null | head -1)
           if [ -n "$result" ]; then
             mkdir -p release_files/system_ext_selinux
             cp -r "$result"/. release_files/system_ext_selinux/
-            echo "Found system_ext selinux: $result"
-          else
-            echo "system_ext selinux not found"
+            echo "✅ Found system_ext selinux"
           fi
 
-          # product selinux folder
+          # product selinux
           result=$(find $SEARCH_DIR -path "*/product/etc/selinux" -type d 2>/dev/null | head -1)
           if [ -n "$result" ]; then
             mkdir -p release_files/product_selinux
             cp -r "$result"/. release_files/product_selinux/
-            echo "Found product selinux: $result"
-          else
-            echo "product selinux not found"
+            echo "✅ Found product selinux"
           fi
 
           # ODM (vendor/odm or odm)
           result=$(find $SEARCH_DIR -path "*/vendor/odm" -type d 2>/dev/null | head -1)
-
           if [ -z "$result" ]; then
             result=$(find $SEARCH_DIR -path "*/odm" -type d 2>/dev/null | head -1)
           fi
@@ -107,27 +98,45 @@ jobs:
           if [ -n "$result" ]; then
             mkdir -p release_files/odm
             cp -r "$result"/. release_files/odm/
-            echo "Found odm: $result"
+            echo "✅ Found odm"
           else
-            echo "odm not found"
-            # Uncomment below to make ODM mandatory:
-            # exit 1
+            echo "⚠️ odm not found"
           fi
 
-          # Zip selinux folders
+          # ===== ZIP CREATION (SAFE) =====
           cd release_files
-          zip -r selinux_all.zip vendor_selinux/ system_selinux/ system_ext_selinux/ product_selinux/ 2>/dev/null || true
 
-          # Zip odm
-          zip -r odm.zip odm/ 2>/dev/null || true
+          # SELINUX ZIP
+          SELINUX_DIRS=""
+          for d in vendor_selinux system_selinux system_ext_selinux product_selinux; do
+            [ -d "$d" ] && SELINUX_DIRS="$SELINUX_DIRS $d"
+          done
+
+          if [ -n "$SELINUX_DIRS" ]; then
+            zip -r selinux_all.zip $SELINUX_DIRS
+            echo "✅ Created selinux_all.zip"
+          else
+            echo "⚠️ No selinux folders, skipping zip"
+          fi
+
+          # ODM ZIP
+          if [ -d "odm" ] && [ "$(ls -A odm)" ]; then
+            zip -r odm.zip odm/
+            echo "✅ Created odm.zip"
+          else
+            echo "⚠️ odm empty, skipping zip"
+          fi
+
           cd ..
 
-          echo "=== Files to upload ==="
-          ls -lh release_files/
+          echo "=== FINAL FILES ==="
+          ls -lh release_files/ || true
+          echo "=== FILE SIZES ==="
+          du -h release_files/* || true
 
-          # Fail if nothing collected
-          if [ -z "$(ls -A release_files/)" ]; then
-            echo "No files collected!"
+          # Fail if NOTHING useful collected
+          if [ -z "$(ls -A release_files/ 2>/dev/null)" ]; then
+            echo "❌ No files collected!"
             exit 1
           fi
 
@@ -139,9 +148,6 @@ jobs:
           body: |
             Firmware: ${{ github.event.inputs.link }}
             Device: ${{ github.event.inputs.device }}
-          files: |
-            release_files/vendor_build.prop
-            release_files/selinux_all.zip
-            release_files/odm.zip
+          files: release_files/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
