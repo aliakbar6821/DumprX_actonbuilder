@@ -1,0 +1,202 @@
+name: Build OPlus HAL Stubs
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27
+          add-to-path: true
+
+      - name: Build all stubs
+        run: |
+          TC="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CC64="${TC}/aarch64-linux-android35-clang++"
+          CC32="${TC}/armv7a-linux-androideabi35-clang++"
+          STRIP="${TC}/llvm-strip"
+
+          SHARED="-shared -fPIC -std=c++17 -fvisibility=hidden -fno-exceptions -fno-rtti -O2 -DANDROID -Wl,--hash-style=gnu -Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now -Istubs"
+          EXE="-fPIC -std=c++17 -fno-exceptions -fno-rtti -O2 -DANDROID -pie -Wl,--hash-style=gnu -Istubs"
+
+          mkdir -p build/vendor/{bin/hw,oplus/lib64,oplus/lib,etc/init,etc/vintf/manifest}
+
+          echo "=== Building 64-bit ==="
+          $CC64 $SHARED -Wl,--soname,vendor.oplus.hardware.charger-V10-ndk_platform.so \
+            -o build/vendor/oplus/lib64/vendor.oplus.hardware.charger-V10-ndk_platform.so \
+            stubs/stub_charger_aidl.cpp -llog
+
+          $CC64 $SHARED -Wl,--soname,vendor.oplus.hardware.stability.oplus_project-V2-ndk_platform.so \
+            -o build/vendor/oplus/lib64/vendor.oplus.hardware.stability.oplus_project-V2-ndk_platform.so \
+            stubs/stub_stability_aidl.cpp -llog
+
+          for lib in libGaiaClient_vnd.so libosenseaidlhalclient.so libsensorndkbridge.so \
+                     android.frameworks.sensorservice@1.0.so android.hardware.sensors@1.0.so \
+                     vendor.oplus.hardware.osense.client-V1-ndk_platform.so \
+                     vendor.oplus.hardware.olc2-V2-ndk_platform.so; do
+            $CC64 $SHARED -Wl,--soname,$lib -o build/vendor/oplus/lib64/$lib stubs/stub_helpers.cpp -llog
+          done
+
+          for lib in libbinder.so libcutils.so libutils.so libbase.so libc++.so \
+                     libhidlbase.so libhidltransport.so libjsoncpp.so libprocessgroup.so; do
+            echo "" | $CC64 -x c++ $SHARED -Wl,--soname,$lib -o build/vendor/oplus/lib64/$lib -
+          done
+
+          $CC64 $EXE -Wl,--rpath,/vendor/oplus/lib64 \
+            -o build/vendor/bin/hw/vendor.oplus.hardware.charger-V10-service \
+            stubs/stub_charger_main.cpp -llog -lbinder_ndk
+
+          $CC64 $EXE -Wl,--rpath,/vendor/oplus/lib64 \
+            -o build/vendor/bin/hw/vendor.oplus.hardware.stability.oplus_project-V1-service \
+            stubs/stub_stability_main.cpp -llog -lbinder_ndk
+
+          echo "=== Building 32-bit ==="
+          $CC32 $SHARED -Wl,--soname,vendor.oplus.hardware.charger-V10-ndk_platform.so \
+            -o build/vendor/oplus/lib/vendor.oplus.hardware.charger-V10-ndk_platform.so \
+            stubs/stub_charger_aidl.cpp -llog
+
+          $CC32 $SHARED -Wl,--soname,vendor.oplus.hardware.stability.oplus_project-V2-ndk_platform.so \
+            -o build/vendor/oplus/lib/vendor.oplus.hardware.stability.oplus_project-V2-ndk_platform.so \
+            stubs/stub_stability_aidl.cpp -llog
+
+          for lib in libGaiaClient_vnd.so libosenseaidlhalclient.so libsensorndkbridge.so \
+                     android.frameworks.sensorservice@1.0.so android.hardware.sensors@1.0.so \
+                     vendor.oplus.hardware.osense.client-V1-ndk_platform.so \
+                     vendor.oplus.hardware.olc2-V2-ndk_platform.so; do
+            $CC32 $SHARED -Wl,--soname,$lib -o build/vendor/oplus/lib/$lib stubs/stub_helpers.cpp -llog
+          done
+
+          for lib in libbinder.so libcutils.so libutils.so libbase.so libc++.so \
+                     libhidlbase.so libhidltransport.so libjsoncpp.so libprocessgroup.so; do
+            echo "" | $CC32 -x c++ $SHARED -Wl,--soname,$lib -o build/vendor/oplus/lib/$lib -
+          done
+
+          echo "=== Stripping ==="
+          find build/ -type f \( -name "*.so" -o -name "*-service" \) -exec $STRIP {} \;
+
+      - name: Create configs
+        run: |
+          cat > build/vendor/etc/init/vendor.oplus.hardware.charger-V10-service.rc << 'EOF'
+          service vendor.oplus.charger /vendor/bin/hw/vendor.oplus.hardware.charger-V10-service
+              class hal
+              user system
+              group system wakelock
+              capabilities BLOCK_SUSPEND
+              disabled
+          on property:sys.boot_completed=1
+              start vendor.oplus.charger
+          EOF
+
+          cat > build/vendor/etc/init/vendor.oplus.hardware.stability.oplus_project-V1-service.rc << 'EOF'
+          service vendor.oplus.stability /vendor/bin/hw/vendor.oplus.hardware.stability.oplus_project-V1-service
+              class hal
+              user system
+              group system
+              disabled
+          on property:sys.boot_completed=1
+              start vendor.oplus.stability
+          EOF
+
+          cat > build/vendor/etc/vintf/manifest/oplus_hals.xml << 'EOF'
+          <manifest version="2.0" type="device">
+              <hal format="aidl">
+                  <name>vendor.oplus.hardware.charger</name>
+                  <version>10</version>
+                  <fqname>ICharger/default</fqname>
+              </hal>
+              <hal format="aidl">
+                  <name>vendor.oplus.hardware.stability.oplus_project</name>
+                  <version>2</version>
+                  <fqname>IOplusProject/default</fqname>
+              </hal>
+          </manifest>
+          EOF
+
+      - name: Create installer
+        run: |
+          cat > build/install.sh << 'EOF'
+          #!/system/bin/sh
+          [ "$(id -u)" != "0" ] && echo "Run as root!" && exit 1
+          S="$(cd "$(dirname "$0")" && pwd)"
+          mount -o remount,rw /vendor 2>/dev/null
+          mkdir -p /vendor/{bin/hw,oplus/lib64,oplus/lib,etc/init,etc/vintf/manifest}
+          mkdir -p /sdcard/oplus_backup
+          cp /vendor/bin/hw/vendor.oplus.hardware.* /sdcard/oplus_backup/ 2>/dev/null
+          cp "$S/vendor/bin/hw"/* /vendor/bin/hw/
+          cp "$S/vendor/oplus/lib64"/*.so /vendor/oplus/lib64/
+          cp "$S/vendor/oplus/lib"/*.so /vendor/oplus/lib/
+          cp "$S/vendor/etc/init"/*.rc /vendor/etc/init/
+          cp "$S/vendor/etc/vintf/manifest"/*.xml /vendor/etc/vintf/manifest/
+          chmod 755 /vendor/bin/hw/vendor.oplus.hardware.*
+          chmod 644 /vendor/oplus/lib64/*.so /vendor/oplus/lib/*.so
+          chmod 644 /vendor/etc/init/*.rc /vendor/etc/vintf/manifest/*.xml
+          for f in /vendor/bin/hw/vendor.oplus.hardware.*; do chcon u:object_r:hal_exec:s0 "$f" 2>/dev/null; done
+          for f in /vendor/oplus/lib64/*.so /vendor/oplus/lib/*.so; do chcon u:object_r:vendor_file:s0 "$f" 2>/dev/null; done
+          echo "Done! Backup at /sdcard/oplus_backup/"
+          echo "Reboot now: reboot"
+          EOF
+          chmod +x build/install.sh
+
+      - name: Get version
+        id: ver
+        run: |
+          V="${GITHUB_REF#refs/tags/}"
+          [ "$V" = "$GITHUB_REF" ] && V="dev-$(date +%Y%m%d%H%M%S)"
+          echo "v=$V" >> $GITHUB_OUTPUT
+
+      - name: Verify builds
+        run: |
+          echo "=== File listing ==="
+          find build/ -type f | sort
+          echo ""
+          echo "=== Charger service RPATH ==="
+          readelf -d build/vendor/bin/hw/vendor.oplus.hardware.charger-V10-service | grep -E "NEEDED|RPATH"
+          echo ""
+          echo "=== Stability service RPATH ==="
+          readelf -d build/vendor/bin/hw/vendor.oplus.hardware.stability.oplus_project-V1-service | grep -E "NEEDED|RPATH"
+          echo ""
+          echo "=== Charger AIDL lib64 exports ==="
+          nm -D build/vendor/oplus/lib64/vendor.oplus.hardware.charger-V10-ndk_platform.so | grep -c " T \| D \| B " || true
+          echo ""
+          echo "=== Stability AIDL lib64 exports ==="
+          nm -D build/vendor/oplus/lib64/vendor.oplus.hardware.stability.oplus_project-V2-ndk_platform.so | grep -c " T \| D \| B " || true
+          echo ""
+          echo "=== Charger AIDL lib exports ==="
+          nm -D build/vendor/oplus/lib/vendor.oplus.hardware.charger-V10-ndk_platform.so | grep -c " T \| D \| B " || true
+          echo ""
+          echo "=== Binary sizes ==="
+          find build/ -type f \( -name "*.so" -o -name "*-service" \) -exec ls -lh {} \;
+
+      - name: Package release zip
+        run: |
+          cd build
+          zip -r9 "../oplus-hal-stubs-${{ steps.ver.outputs.v }}.zip" vendor/ install.sh README.md
+          cd ..
+          sha256sum "oplus-hal-stubs-${{ steps.ver.outputs.v }}.zip" > "oplus-hal-stubs-${{ steps.ver.outputs.v }}.zip.sha256"
+
+      - name: Upload artifact (all builds)
+        uses: actions/upload-artifact@v4
+        with:
+          name: oplus-hal-stubs-${{ steps.ver.outputs.v }}
+          path: |
+            oplus-hal-stubs-*.zip
+            oplus-hal-stubs-*.zip.sha256
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            oplus-hal-stubs-*.zip
+            oplus-hal-stubs-*.zip.sha256
+          generate_release_notes: true
+          tag_name: ${{ steps.ver.outputs.v }}
