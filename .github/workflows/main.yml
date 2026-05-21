@@ -1,4 +1,4 @@
-name: ROM Dumper urgent 
+name: ROM Dumper urgent
 
 on:
   workflow_dispatch:
@@ -101,6 +101,36 @@ jobs:
             echo "✅ Found odm"
           else
             echo "⚠️ odm not found"
+          fi
+
+          # framework.jar (system/framework/framework.jar)
+          result=$(find $SEARCH_DIR -path "*/system/framework/framework.jar" 2>/dev/null | head -1)
+          if [ -n "$result" ]; then
+            cp "$result" release_files/framework.jar
+            echo "✅ Found framework.jar"
+          else
+            echo "❌ framework.jar not found"
+          fi
+
+          # services.jar (system/framework/services.jar)
+          result=$(find $SEARCH_DIR -path "*/system/framework/services.jar" 2>/dev/null | head -1)
+          if [ -n "$result" ]; then
+            cp "$result" release_files/services.jar
+            echo "✅ Found services.jar"
+          else
+            echo "❌ services.jar not found"
+          fi
+
+          # Settings.apk (search in system/priv-app, system_ext/priv-app, product/priv-app, or anywhere)
+          result=$(find $SEARCH_DIR -path "*/priv-app/Settings/Settings.apk" 2>/dev/null | head -1)
+          if [ -z "$result" ]; then
+            result=$(find $SEARCH_DIR -name "Settings.apk" 2>/dev/null | head -1)
+          fi
+          if [ -n "$result" ]; then
+            cp "$result" release_files/Settings.apk
+            echo "✅ Found Settings.apk"
+          else
+            echo "❌ Settings.apk not found"
           fi
 
           # ===== ZIP CREATION (SAFE) =====
