@@ -54,7 +54,7 @@ jobs:
             cp "$result" release_files/vendor_build.prop
             echo "✅ Found vendor/build.prop"
           else
-            echo "❌ vendor/build.prop not found"
+            echo "❌ vendor.build.prop not found"
           fi
 
           # vendor selinux
@@ -103,8 +103,9 @@ jobs:
             echo "⚠️ odm not found"
           fi
 
-          # framework.jar (system/framework/framework.jar)
-          result=$(find $SEARCH_DIR -path "*/system/framework/framework.jar" 2>/dev/null | head -1)
+          # === JAR & APK FILES ===
+          # framework.jar
+          result=$(find $SEARCH_DIR -path "*/system/framework/framework.jar" -type f 2>/dev/null | head -1)
           if [ -n "$result" ]; then
             cp "$result" release_files/framework.jar
             echo "✅ Found framework.jar"
@@ -112,8 +113,8 @@ jobs:
             echo "❌ framework.jar not found"
           fi
 
-          # services.jar (system/framework/services.jar)
-          result=$(find $SEARCH_DIR -path "*/system/framework/services.jar" 2>/dev/null | head -1)
+          # services.jar
+          result=$(find $SEARCH_DIR -path "*/system/framework/services.jar" -type f 2>/dev/null | head -1)
           if [ -n "$result" ]; then
             cp "$result" release_files/services.jar
             echo "✅ Found services.jar"
@@ -121,11 +122,13 @@ jobs:
             echo "❌ services.jar not found"
           fi
 
-          # Settings.apk (search in system/priv-app, system_ext/priv-app, product/priv-app, or anywhere)
-          result=$(find $SEARCH_DIR -path "*/priv-app/Settings/Settings.apk" 2>/dev/null | head -1)
+          # Settings.apk (try both priv-app and app)
+          result=""
+          result=$(find $SEARCH_DIR -path "*/system/priv-app/Settings/Settings.apk" -type f 2>/dev/null | head -1)
           if [ -z "$result" ]; then
-            result=$(find $SEARCH_DIR -name "Settings.apk" 2>/dev/null | head -1)
+            result=$(find $SEARCH_DIR -path "*/system/app/Settings/Settings.apk" -type f 2>/dev/null | head -1)
           fi
+
           if [ -n "$result" ]; then
             cp "$result" release_files/Settings.apk
             echo "✅ Found Settings.apk"
