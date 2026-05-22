@@ -20,6 +20,15 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+      - name: Prepare Variables (Sanitize Device Name)
+        id: vars
+        run: |
+          SAFE_DEVICE=$(echo "${{ github.event.inputs.device }}" | tr '[:upper:]' '[:lower:]' | tr ' _' '-' | tr -cd 'a-z0-9-')
+          echo "safe_device=${SAFE_DEVICE}" >> $GITHUB_OUTPUT
+          echo "release_name=${{ github.event.inputs.device }} Vendor Dump" >> $GITHUB_OUTPUT
+          echo "tag_name=dump-${SAFE_DEVICE}-${{ github.run_number }}" >> $GITHUB_OUTPUT
+          echo "Using safe device name: ${SAFE_DEVICE}"
+
       - name: Download ROM First
         run: |
           aria2c -x16 -s16 -k1M --check-certificate=false -o rom.zip "$LINK"
@@ -48,87 +57,42 @@ jobs:
           mkdir -p release_files
           SEARCH_DIR="DumprX/out"
 
-          # vendor/build.prop
+          # === Existing collections (vendor/build.prop, selinux, odm) ===
           result=$(find $SEARCH_DIR -path "*/vendor/build.prop" 2>/dev/null | head -1)
           if [ -n "$result" ]; then
             cp "$result" release_files/vendor_build.prop
             echo "✅ Found vendor/build.prop"
-          else
-            echo "❌ vendor.build.prop not found"
           fi
 
-          # vendor selinux
-          result=$(find $SEARCH_DIR -path "*/vendor/etc/selinux" -type d 2>/dev/null | head -1)
-          if [ -n "$result" ]; then
-            mkdir -p release_files/vendor_selinux
-            cp -r "$result"/. release_files/vendor_selinux/
-            echo "✅ Found vendor selinux"
-          fi
+          for selinux in vendor system system_ext product; do
+            result=$(find $SEARCH_DIR -path "*/${selinux}/etc/selinux" -type d 2>/dev/null | head -1)
+            if [ -n "$result" ]; then
+              mkdir -p release_files/${selinux}_selinux
+              cp -r "$result"/. release_files/${selinux}_selinux/
+              echo "✅ Found ${selinux} selinux"
+            fi
+          done
 
-          # system selinux
-          result=$(find $SEARCH_DIR -path "*/system/etc/selinux" -type d 2>/dev/null | head -1)
-          if [ -n "$result" ]; then
-            mkdir -p release_files/system_selinux
-            cp -r "$result"/. release_files/system_selinux/
-            echo "✅ Found system selinux"
-          fi
-
-          # system_ext selinux
-          result=$(find $SEARCH_DIR -path "*/system_ext/etc/selinux" -type d 2>/dev/null | head -1)
-          if [ -n "$result" ]; then
-            mkdir -p release_files/system_ext_selinux
-            cp -r "$result"/. release_files/system_ext_selinux/
-            echo "✅ Found system_ext selinux"
-          fi
-
-          # product selinux
-          result=$(find $SEARCH_DIR -path "*/product/etc/selinux" -type d 2>/dev/null | head -1)
-          if [ -n "$result" ]; then
-            mkdir -p release_files/product_selinux
-            cp -r "$result"/. release_files/product_selinux/
-            echo "✅ Found product selinux"
-          fi
-
-          # ODM (vendor/odm or odm)
+          # ODM
           result=$(find $SEARCH_DIR -path "*/vendor/odm" -type d 2>/dev/null | head -1)
           if [ -z "$result" ]; then
             result=$(find $SEARCH_DIR -path "*/odm" -type d 2>/dev/null | head -1)
           fi
-
           if [ -n "$result" ]; then
             mkdir -p release_files/odm
             cp -r "$result"/. release_files/odm/
             echo "✅ Found odm"
-          else
-            echo "⚠️ odm not found"
           fi
 
-          # === JAR & APK FILES ===
-          # framework.jar
-          result=$(find $SEARCH_DIR -path "*/system/framework/framework.jar" -type f 2>/dev/null | head -1)
-          if [ -n "$result" ]; then
-            cp "$result" release_files/framework.jar
-            echo "✅ Found framework.jar"
-          else
-            echo "❌ framework.jar not found"
-          fi
+          # === NEW: framework.jar, services.jar, Settings.apk ===
+          find $SEARCH_DIR -path "*/system/framework/framework.jar" -type f -exec cp {} release_files/framework.jar \; && echo "✅ Found framework.jar" || echo "❌ framework.jar not found"
+          find $SEARCH_DIR -path "*/system/framework/services.jar"  -type f -exec cp {} release_files/services.jar  \; && echo "✅ Found services.jar"  || echo "❌ services.jar not found"
 
-          # services.jar
-          result=$(find $SEARCH_DIR -path "*/system/framework/services.jar" -type f 2>/dev/null | head -1)
-          if [ -n "$result" ]; then
-            cp "$result" release_files/services.jar
-            echo "✅ Found services.jar"
-          else
-            echo "❌ services.jar not found"
-          fi
-
-          # Settings.apk (try both priv-app and app)
-          result=""
+          # Settings.apk (priv-app first, then app)
           result=$(find $SEARCH_DIR -path "*/system/priv-app/Settings/Settings.apk" -type f 2>/dev/null | head -1)
           if [ -z "$result" ]; then
             result=$(find $SEARCH_DIR -path "*/system/app/Settings/Settings.apk" -type f 2>/dev/null | head -1)
           fi
-
           if [ -n "$result" ]; then
             cp "$result" release_files/Settings.apk
             echo "✅ Found Settings.apk"
@@ -136,51 +100,42 @@ jobs:
             echo "❌ Settings.apk not found"
           fi
 
-          # ===== ZIP CREATION (SAFE) =====
+          # ===== ZIP CREATION =====
           cd release_files
 
-          # SELINUX ZIP
-          SELINUX_DIRS=""
-          for d in vendor_selinux system_selinux system_ext_selinux product_selinux; do
-            [ -d "$d" ] && SELINUX_DIRS="$SELINUX_DIRS $d"
-          done
-
+          SELINUX_DIRS=$(ls -d *_selinux 2>/dev/null || true)
           if [ -n "$SELINUX_DIRS" ]; then
             zip -r selinux_all.zip $SELINUX_DIRS
             echo "✅ Created selinux_all.zip"
-          else
-            echo "⚠️ No selinux folders, skipping zip"
           fi
 
-          # ODM ZIP
-          if [ -d "odm" ] && [ "$(ls -A odm)" ]; then
+          if [ -d "odm" ] && [ "$(ls -A odm 2>/dev/null)" ]; then
             zip -r odm.zip odm/
             echo "✅ Created odm.zip"
-          else
-            echo "⚠️ odm empty, skipping zip"
           fi
 
           cd ..
 
           echo "=== FINAL FILES ==="
-          ls -lh release_files/ || true
-          echo "=== FILE SIZES ==="
-          du -h release_files/* || true
+          ls -lh release_files/
+          du -h release_files/*
 
-          # Fail if NOTHING useful collected
-          if [ -z "$(ls -A release_files/ 2>/dev/null)" ]; then
-            echo "❌ No files collected!"
-            exit 1
-          fi
+          [ -z "$(ls -A release_files/ 2>/dev/null)" ] && { echo "❌ No files collected!"; exit 1; }
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: dump-${{ github.event.inputs.device }}-${{ github.run_number }}
-          name: "${{ github.event.inputs.device }} vendor dump"
+          tag_name: ${{ steps.vars.outputs.tag_name }}
+          name: ${{ steps.vars.outputs.release_name }}
           body: |
-            Firmware: ${{ github.event.inputs.link }}
-            Device: ${{ github.event.inputs.device }}
+            **Device:** ${{ github.event.inputs.device }}
+            **Firmware:** ${{ github.event.inputs.link }}
+            **Run ID:** ${{ github.run_number }}
+
+            Auto-generated by ROM Dumper.
           files: release_files/*
+          draft: false
+          prerelease: false
+          make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
