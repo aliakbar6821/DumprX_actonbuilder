@@ -1,4 +1,4 @@
-name: ROM Dumper urgent
+name: ROM Dumper
 
 on:
   workflow_dispatch:
@@ -10,6 +10,36 @@ on:
         description: 'Device codename (e.g. cancunf)'
         required: true
         default: 'cancunf'
+      upload_build_prop:
+        description: 'Upload vendor build.prop'
+        type: boolean
+        required: false
+        default: true
+      upload_selinux:
+        description: 'Upload SELinux policies (all partitions)'
+        type: boolean
+        required: false
+        default: true
+      upload_framework:
+        description: 'Upload framework.jar'
+        type: boolean
+        required: false
+        default: true
+      upload_services:
+        description: 'Upload services.jar'
+        type: boolean
+        required: false
+        default: true
+      upload_settings:
+        description: 'Upload Settings.apk'
+        type: boolean
+        required: false
+        default: true
+      upload_odm:
+        description: 'Upload ODM partition'
+        type: boolean
+        required: false
+        default: true
 
 env:
   LINK: ${{ github.event.inputs.link }}
@@ -20,16 +50,15 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Prepare Variables (Sanitize Device Name)
+      - name: Sanitize Device Name
         id: vars
         run: |
           SAFE_DEVICE=$(echo "${{ github.event.inputs.device }}" | tr '[:upper:]' '[:lower:]' | tr ' _' '-' | tr -cd 'a-z0-9-')
           echo "safe_device=${SAFE_DEVICE}" >> $GITHUB_OUTPUT
-          echo "release_name=${{ github.event.inputs.device }} Vendor Dump" >> $GITHUB_OUTPUT
           echo "tag_name=dump-${SAFE_DEVICE}-${{ github.run_number }}" >> $GITHUB_OUTPUT
-          echo "Using safe device name: ${SAFE_DEVICE}"
+          echo "✅ Sanitized device name: ${SAFE_DEVICE}"
 
-      - name: Download ROM First
+      - name: Download ROM
         run: |
           aria2c -x16 -s16 -k1M --check-certificate=false -o rom.zip "$LINK"
           ls -lh rom.zip
@@ -52,88 +81,258 @@ jobs:
           mv ../rom.zip .
           bash dumper.sh rom.zip
 
-      - name: Collect Files
+      - name: Debug - Show Dump Structure
         run: |
-          mkdir -p release_files
+          echo "=== Top-level dump structure ==="
+          ls -la DumprX/out/ || echo "No out directory"
+          echo ""
+          echo "=== Looking for Settings.apk everywhere ==="
+          find DumprX/out -iname "Settings.apk" -type f 2>/dev/null || echo "No Settings.apk found anywhere"
+          find DumprX/out -iname "Settings*.apk" -type f 2>/dev/null || echo "No Settings*.apk found"
+          echo ""
+          echo "=== Looking for priv-app contents ==="
+          find DumprX/out -path "*/priv-app/*" -name "*.apk" -type f 2>/dev/null | head -20 || echo "No priv-app APKs"
+          echo ""
+          echo "=== ODM structure ==="
+          find DumprX/out -path "*/odm/*" -type f 2>/dev/null | head -20 || echo "No ODM files"
+          find DumprX/out -path "*/odm/*" -type l 2>/dev/null | head -20 || echo "No ODM symlinks"
+
+      - name: Collect and Package Files
+        run: |
+          mkdir -p upload_files
           SEARCH_DIR="DumprX/out"
+          COLLECTED=""
 
-          # === Existing collections (vendor/build.prop, selinux, odm) ===
-          result=$(find $SEARCH_DIR -path "*/vendor/build.prop" 2>/dev/null | head -1)
-          if [ -n "$result" ]; then
-            cp "$result" release_files/vendor_build.prop
-            echo "✅ Found vendor/build.prop"
-          fi
-
-          for selinux in vendor system system_ext product; do
-            result=$(find $SEARCH_DIR -path "*/${selinux}/etc/selinux" -type d 2>/dev/null | head -1)
+          # ========================
+          # 1. VENDOR BUILD.PROP
+          # ========================
+          if [ "${{ github.event.inputs.upload_build_prop }}" = "true" ]; then
+            result=$(find $SEARCH_DIR -path "*/vendor/build.prop" -type f 2>/dev/null | head -1)
             if [ -n "$result" ]; then
-              mkdir -p release_files/${selinux}_selinux
-              cp -r "$result"/. release_files/${selinux}_selinux/
-              echo "✅ Found ${selinux} selinux"
+              cp "$result" upload_files/vendor_build.prop
+              COLLECTED="${COLLECTED}\n- vendor_build.prop ✅"
+              echo "✅ vendor/build.prop collected"
+            else
+              echo "❌ vendor/build.prop not found"
+              COLLECTED="${COLLECTED}\n- vendor_build.prop ❌ not found"
             fi
-          done
-
-          # ODM
-          result=$(find $SEARCH_DIR -path "*/vendor/odm" -type d 2>/dev/null | head -1)
-          if [ -z "$result" ]; then
-            result=$(find $SEARCH_DIR -path "*/odm" -type d 2>/dev/null | head -1)
-          fi
-          if [ -n "$result" ]; then
-            mkdir -p release_files/odm
-            cp -r "$result"/. release_files/odm/
-            echo "✅ Found odm"
-          fi
-
-          # === NEW: framework.jar, services.jar, Settings.apk ===
-          find $SEARCH_DIR -path "*/system/framework/framework.jar" -type f -exec cp {} release_files/framework.jar \; && echo "✅ Found framework.jar" || echo "❌ framework.jar not found"
-          find $SEARCH_DIR -path "*/system/framework/services.jar"  -type f -exec cp {} release_files/services.jar  \; && echo "✅ Found services.jar"  || echo "❌ services.jar not found"
-
-          # Settings.apk (priv-app first, then app)
-          result=$(find $SEARCH_DIR -path "*/system/priv-app/Settings/Settings.apk" -type f 2>/dev/null | head -1)
-          if [ -z "$result" ]; then
-            result=$(find $SEARCH_DIR -path "*/system/app/Settings/Settings.apk" -type f 2>/dev/null | head -1)
-          fi
-          if [ -n "$result" ]; then
-            cp "$result" release_files/Settings.apk
-            echo "✅ Found Settings.apk"
           else
-            echo "❌ Settings.apk not found"
+            echo "⏭️ Skipping vendor build.prop (not selected)"
           fi
 
-          # ===== ZIP CREATION =====
-          cd release_files
+          # ========================
+          # 2. SELINUX POLICIES
+          # ========================
+          if [ "${{ github.event.inputs.upload_selinux }}" = "true" ]; then
+            SELINUX_FOUND=false
+            mkdir -p /tmp/selinux_staging
 
-          SELINUX_DIRS=$(ls -d *_selinux 2>/dev/null || true)
-          if [ -n "$SELINUX_DIRS" ]; then
-            zip -r selinux_all.zip $SELINUX_DIRS
-            echo "✅ Created selinux_all.zip"
+            for partition in vendor system system_ext product; do
+              result=$(find $SEARCH_DIR -path "*/${partition}/etc/selinux" -type d 2>/dev/null | head -1)
+              if [ -n "$result" ]; then
+                mkdir -p /tmp/selinux_staging/${partition}_selinux
+                cp -rL "$result"/. /tmp/selinux_staging/${partition}_selinux/ 2>/dev/null || true
+                SELINUX_FOUND=true
+                echo "✅ Found ${partition} selinux"
+              fi
+            done
+
+            if [ "$SELINUX_FOUND" = true ]; then
+              cd /tmp/selinux_staging
+              zip -r selinux_all.zip ./*
+              cp selinux_all.zip $OLDPWD/upload_files/selinux_all.zip
+              cd $OLDPWD
+              COLLECTED="${COLLECTED}\n- selinux_all.zip ✅"
+              echo "✅ selinux_all.zip created ($(du -h upload_files/selinux_all.zip | cut -f1))"
+            else
+              echo "❌ No SELinux policies found"
+              COLLECTED="${COLLECTED}\n- selinux_all.zip ❌ not found"
+            fi
+          else
+            echo "⏭️ Skipping SELinux (not selected)"
           fi
 
-          if [ -d "odm" ] && [ "$(ls -A odm 2>/dev/null)" ]; then
-            zip -r odm.zip odm/
-            echo "✅ Created odm.zip"
+          # ========================
+          # 3. FRAMEWORK.JAR
+          # ========================
+          if [ "${{ github.event.inputs.upload_framework }}" = "true" ]; then
+            result=$(find $SEARCH_DIR -path "*/system/framework/framework.jar" -type f 2>/dev/null | head -1)
+            if [ -z "$result" ]; then
+              result=$(find $SEARCH_DIR -iname "framework.jar" -type f 2>/dev/null | head -1)
+            fi
+            if [ -n "$result" ]; then
+              cp "$result" upload_files/framework.jar
+              COLLECTED="${COLLECTED}\n- framework.jar ✅ ($(du -h upload_files/framework.jar | cut -f1))"
+              echo "✅ framework.jar collected"
+            else
+              echo "❌ framework.jar not found"
+              COLLECTED="${COLLECTED}\n- framework.jar ❌ not found"
+            fi
+          else
+            echo "⏭️ Skipping framework.jar (not selected)"
           fi
 
-          cd ..
+          # ========================
+          # 4. SERVICES.JAR
+          # ========================
+          if [ "${{ github.event.inputs.upload_services }}" = "true" ]; then
+            result=$(find $SEARCH_DIR -path "*/system/framework/services.jar" -type f 2>/dev/null | head -1)
+            if [ -z "$result" ]; then
+              result=$(find $SEARCH_DIR -iname "services.jar" -type f 2>/dev/null | head -1)
+            fi
+            if [ -n "$result" ]; then
+              cp "$result" upload_files/services.jar
+              COLLECTED="${COLLECTED}\n- services.jar ✅ ($(du -h upload_files/services.jar | cut -f1))"
+              echo "✅ services.jar collected"
+            else
+              echo "❌ services.jar not found"
+              COLLECTED="${COLLECTED}\n- services.jar ❌ not found"
+            fi
+          else
+            echo "⏭️ Skipping services.jar (not selected)"
+          fi
 
-          echo "=== FINAL FILES ==="
-          ls -lh release_files/
-          du -h release_files/*
+          # ========================
+          # 5. SETTINGS.APK
+          # ========================
+          if [ "${{ github.event.inputs.upload_settings }}" = "true" ]; then
+            SETTINGS_FOUND=false
 
-          [ -z "$(ls -A release_files/ 2>/dev/null)" ] && { echo "❌ No files collected!"; exit 1; }
+            SETTINGS_PATTERNS=(
+              "*/system/priv-app/Settings/Settings.apk"
+              "*/system/app/Settings/Settings.apk"
+              "*/system/product/priv-app/Settings/Settings.apk"
+              "*/product/priv-app/Settings/Settings.apk"
+              "*/system_ext/priv-app/Settings/Settings.apk"
+              "*/system/priv-app/SettingsGoogle/SettingsGoogle.apk"
+              "*/product/priv-app/SettingsGoogle/SettingsGoogle.apk"
+              "*/system_ext/priv-app/SettingsGoogle/SettingsGoogle.apk"
+            )
+
+            for pattern in "${SETTINGS_PATTERNS[@]}"; do
+              result=$(find $SEARCH_DIR -path "$pattern" -type f 2>/dev/null | head -1)
+              if [ -n "$result" ]; then
+                cp "$result" upload_files/Settings.apk
+                COLLECTED="${COLLECTED}\n- Settings.apk ✅ (from: $result)"
+                echo "✅ Settings.apk found at: $result"
+                SETTINGS_FOUND=true
+                break
+              fi
+            done
+
+            # Last resort: case-insensitive search
+            if [ "$SETTINGS_FOUND" = false ]; then
+              result=$(find $SEARCH_DIR -iname "settings.apk" -type f 2>/dev/null | head -1)
+              if [ -n "$result" ]; then
+                cp "$result" upload_files/Settings.apk
+                COLLECTED="${COLLECTED}\n- Settings.apk ✅ (fallback: $result)"
+                echo "✅ Settings.apk found via fallback: $result"
+                SETTINGS_FOUND=true
+              fi
+            fi
+
+            if [ "$SETTINGS_FOUND" = false ]; then
+              echo "❌ Settings.apk not found anywhere"
+              COLLECTED="${COLLECTED}\n- Settings.apk ❌ not found"
+            fi
+          else
+            echo "⏭️ Skipping Settings.apk (not selected)"
+          fi
+
+          # ========================
+          # 6. ODM PARTITION
+          # ========================
+          if [ "${{ github.event.inputs.upload_odm }}" = "true" ]; then
+            ODM_DIR=""
+            result=$(find $SEARCH_DIR -maxdepth 3 -name "odm" -type d 2>/dev/null | head -1)
+            if [ -n "$result" ]; then
+              ODM_DIR="$result"
+            fi
+
+            if [ -n "$ODM_DIR" ]; then
+              # Check if ODM has real files (not just symlinks)
+              REAL_FILES=$(find "$ODM_DIR" -type f 2>/dev/null | head -1)
+              if [ -n "$REAL_FILES" ]; then
+                mkdir -p /tmp/odm_staging
+                cp -rL "$ODM_DIR"/. /tmp/odm_staging/ 2>/dev/null || true
+                cd /tmp/odm_staging
+                zip -r odm.zip . > /dev/null 2>&1
+                cp odm.zip $OLDPWD/upload_files/odm.zip
+                cd $OLDPWD
+                COLLECTED="${COLLECTED}\n- odm.zip ✅ ($(du -h upload_files/odm.zip | cut -f1))"
+                echo "✅ odm.zip created with real files"
+              else
+                echo "⚠️ ODM directory found but contains only symlinks or is empty"
+                # Try following symlinks
+                mkdir -p /tmp/odm_staging
+                cp -rL "$ODM_DIR"/. /tmp/odm_staging/ 2>/dev/null || true
+                FILE_COUNT=$(find /tmp/odm_staging -type f 2>/dev/null | wc -l)
+                if [ "$FILE_COUNT" -gt 0 ]; then
+                  cd /tmp/odm_staging
+                  zip -r odm.zip . > /dev/null 2>&1
+                  cp odm.zip $OLDPWD/upload_files/odm.zip
+                  cd $OLDPWD
+                  COLLECTED="${COLLECTED}\n- odm.zip ✅ (symlinks resolved, $(du -h upload_files/odm.zip | cut -f1))"
+                  echo "✅ odm.zip created (symlinks resolved)"
+                else
+                  echo "❌ ODM directory is truly empty"
+                  COLLECTED="${COLLECTED}\n- odm.zip ❌ empty"
+                fi
+              fi
+            else
+              echo "❌ ODM directory not found"
+              COLLECTED="${COLLECTED}\n- odm.zip ❌ not found"
+            fi
+          else
+            echo "⏭️ Skipping ODM (not selected)"
+          fi
+
+          # ========================
+          # FINAL CHECK
+          # ========================
+          echo ""
+          echo "========================================="
+          echo "       COLLECTION SUMMARY"
+          echo "========================================="
+          echo -e "$COLLECTED"
+          echo "========================================="
+          echo ""
+          echo "=== FILES READY FOR UPLOAD ==="
+          ls -lh upload_files/ || true
+          echo ""
+
+          # Count actual files (not directories)
+          FILE_COUNT=$(find upload_files -maxdepth 1 -type f 2>/dev/null | wc -l)
+          echo "Total uploadable files: $FILE_COUNT"
+
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "❌ No files were collected! Check ROM dump output."
+            exit 1
+          fi
+
+          echo "✅ Ready to upload $FILE_COUNT file(s)"
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.vars.outputs.tag_name }}
-          name: ${{ steps.vars.outputs.release_name }}
+          name: "${{ github.event.inputs.device }} Firmware Dump"
           body: |
-            **Device:** ${{ github.event.inputs.device }}
-            **Firmware:** ${{ github.event.inputs.link }}
-            **Run ID:** ${{ github.run_number }}
+            ## 📱 ${{ github.event.inputs.device }} Firmware Dump
 
-            Auto-generated by ROM Dumper.
-          files: release_files/*
+            **Firmware:** `${{ github.event.inputs.link }}`
+            **Run:** #${{ github.run_number }}
+
+            ### Selected Uploads
+            - Build.prop: ${{ github.event.inputs.upload_build_prop }}
+            - SELinux: ${{ github.event.inputs.upload_selinux }}
+            - framework.jar: ${{ github.event.inputs.upload_framework }}
+            - services.jar: ${{ github.event.inputs.upload_services }}
+            - Settings.apk: ${{ github.event.inputs.upload_settings }}
+            - ODM: ${{ github.event.inputs.upload_odm }}
+
+            > Auto-generated by ROM Dumper
+          files: upload_files/*
           draft: false
           prerelease: false
           make_latest: false
