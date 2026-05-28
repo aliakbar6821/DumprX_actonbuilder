@@ -68,51 +68,43 @@ jobs:
           echo "tag_name=dump-${SAFE_DEVICE}-${{ github.run_number }}" >> $GITHUB_OUTPUT
           echo "✅ Sanitized device name: ${SAFE_DEVICE}"
 
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Cleanup Space
         uses: rokibhasansagar/slimhub_actions@main
 
-      - name: Clone DumprX fork
-        # Clones YOUR fork of DumprX — change the URL to your fork once created
-        run: |
-          git clone https://github.com/${{ github.repository_owner }}/DumprX_actonbuilder --depth=1
-          echo "✅ Cloned DumprX fork"
-
       - name: Install DumprX Requirements
-        run: |
-          cd DumprX_actonbuilder
-          bash setup.sh
+        run: bash setup.sh
 
       - name: Run DumprX
-        run: |
-          cd DumprX_actonbuilder
-          bash dumper.sh "$LINK"
+        run: bash dumper.sh "$LINK"
 
       - name: Debug - Show Dump Structure
         run: |
           echo "=== Top-level dump structure ==="
-          ls -la DumprX_actonbuilder/out/ || echo "No out directory"
+          ls -la out/ || echo "No out directory"
           echo ""
           echo "=== All build.prop files ==="
-          find DumprX_actonbuilder/out -name "build.prop" -type f 2>/dev/null || echo "No build.prop files found"
+          find out -name "build.prop" -type f 2>/dev/null || echo "No build.prop files found"
           echo ""
           echo "=== Looking for Settings.apk ==="
-          find DumprX_actonbuilder/out -iname "Settings.apk" -type f 2>/dev/null || echo "No Settings.apk found"
-          find DumprX_actonbuilder/out -iname "Settings*.apk" -type f 2>/dev/null || true
+          find out -iname "Settings.apk" -type f 2>/dev/null || echo "No Settings.apk found"
+          find out -iname "Settings*.apk" -type f 2>/dev/null || true
           echo ""
           echo "=== Looking for priv-app APKs ==="
-          find DumprX_actonbuilder/out -path "*/priv-app/*" -name "*.apk" -type f 2>/dev/null | head -20 || echo "No priv-app APKs"
+          find out -path "*/priv-app/*" -name "*.apk" -type f 2>/dev/null | head -20 || echo "No priv-app APKs"
           echo ""
           echo "=== ODM structure ==="
-          find DumprX_actonbuilder/out -path "*/odm/*" -type f 2>/dev/null | head -20 || echo "No ODM files"
+          find out -path "*/odm/*" -type f 2>/dev/null | head -20 || echo "No ODM files"
 
       - name: Collect and Package Files
         run: |
           mkdir -p upload_files
-          SEARCH_DIR="DumprX_actonbuilder/out"
+          SEARCH_DIR="out"
           COLLECTED=""
 
           # Helper: copy a file only if it exists AND is non-empty.
-          # Usage: safe_copy <src> <dst> <label>
           # Returns 0 on success, 1 if skipped.
           safe_copy() {
             local src="$1" dst="$2" label="$3"
@@ -149,9 +141,10 @@ jobs:
           # 2. SYSTEM BUILD.PROP
           # ========================
           if [ "${{ github.event.inputs.upload_system_build_prop }}" = "true" ]; then
-            # DumprX puts system directly under out/system/ — prefer that over nested out/system/system/
+            # DumprX outputs to out/system/ directly — prefer that over out/system/system/
             result=$(find $SEARCH_DIR -path "*/system/build.prop" -not -path "*/system/system/build.prop" -type f 2>/dev/null | head -1)
             if [ -z "$result" ]; then
+              # Fallback: some devices have a nested system/system mount layout
               result=$(find $SEARCH_DIR -path "*/system/system/build.prop" -type f 2>/dev/null | head -1)
             fi
             if [ -n "$result" ] && safe_copy "$result" upload_files/system_build.prop "system/build.prop"; then
@@ -369,7 +362,7 @@ jobs:
           echo "✅ Ready to upload $FILE_COUNT file(s)"
 
       - name: Print Build Props
-        # Always runs so content is in logs even if the release step fails
+        # Always runs so content is visible in logs even if the release step fails
         if: always()
         run: |
           echo "========================================="
@@ -418,4 +411,3 @@ jobs:
           make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
