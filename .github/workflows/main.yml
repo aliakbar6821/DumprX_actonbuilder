@@ -96,6 +96,9 @@ jobs:
           echo "=== Top-level dump structure ==="
           ls -la DumprX/out/ || echo "No out directory"
           echo ""
+          echo "=== All build.prop files ==="
+          find DumprX/out -name "build.prop" -type f 2>/dev/null || echo "No build.prop files found"
+          echo ""
           echo "=== Looking for Settings.apk everywhere ==="
           find DumprX/out -iname "Settings.apk" -type f 2>/dev/null || echo "No Settings.apk found anywhere"
           find DumprX/out -iname "Settings*.apk" -type f 2>/dev/null || echo "No Settings*.apk found"
@@ -106,9 +109,6 @@ jobs:
           echo "=== ODM structure ==="
           find DumprX/out -path "*/odm/*" -type f 2>/dev/null | head -20 || echo "No ODM files"
           find DumprX/out -path "*/odm/*" -type l 2>/dev/null | head -20 || echo "No ODM symlinks"
-          echo ""
-          echo "=== All build.prop files ==="
-          find DumprX/out -name "build.prop" -type f 2>/dev/null || echo "No build.prop files found"
 
       - name: Collect and Package Files
         run: |
@@ -116,18 +116,34 @@ jobs:
           SEARCH_DIR="DumprX/out"
           COLLECTED=""
 
+          # Helper: copy file only if it exists AND is non-empty
+          safe_copy() {
+            local src="$1" dst="$2" label="$3"
+            if [ ! -f "$src" ]; then
+              echo "❌ $label — file not found at: $src"
+              return 1
+            fi
+            local sz
+            sz=$(stat -c%s "$src" 2>/dev/null || echo 0)
+            if [ "$sz" -eq 0 ]; then
+              echo "⚠️  $label — file exists but is 0 bytes (partition extraction likely failed via I/O error). Skipping."
+              return 1
+            fi
+            cp "$src" "$dst"
+            return 0
+          }
+
           # ========================
           # 1. VENDOR BUILD.PROP
           # ========================
           if [ "${{ github.event.inputs.upload_build_prop }}" = "true" ]; then
             result=$(find $SEARCH_DIR -path "*/vendor/build.prop" -type f 2>/dev/null | head -1)
-            if [ -n "$result" ]; then
-              cp "$result" upload_files/vendor_build.prop
+            if [ -n "$result" ] && safe_copy "$result" upload_files/vendor_build.prop "vendor/build.prop"; then
               COLLECTED="${COLLECTED}\n- vendor_build.prop ✅"
               echo "✅ vendor/build.prop collected"
             else
-              echo "❌ vendor/build.prop not found"
-              COLLECTED="${COLLECTED}\n- vendor_build.prop ❌ not found"
+              [ -z "$result" ] && echo "❌ vendor/build.prop not found"
+              COLLECTED="${COLLECTED}\n- vendor_build.prop ❌ not found or empty"
             fi
           else
             echo "⏭️ Skipping vendor build.prop (not selected)"
@@ -137,19 +153,18 @@ jobs:
           # 2. SYSTEM BUILD.PROP
           # ========================
           if [ "${{ github.event.inputs.upload_system_build_prop }}" = "true" ]; then
-            # Prefer the file directly under system/, not system/system/ (mounted root quirk)
+            # Prefer file directly under system/, not system/system/ (mounted root quirk)
             result=$(find $SEARCH_DIR -path "*/system/build.prop" -not -path "*/system/system/build.prop" -type f 2>/dev/null | head -1)
             if [ -z "$result" ]; then
-              # Fallback: accept system/system/build.prop for devices with nested system mount
+              # Fallback: nested mount layout
               result=$(find $SEARCH_DIR -path "*/system/system/build.prop" -type f 2>/dev/null | head -1)
             fi
-            if [ -n "$result" ]; then
-              cp "$result" upload_files/system_build.prop
+            if [ -n "$result" ] && safe_copy "$result" upload_files/system_build.prop "system/build.prop"; then
               COLLECTED="${COLLECTED}\n- system_build.prop ✅"
               echo "✅ system/build.prop collected from: $result"
             else
-              echo "❌ system/build.prop not found"
-              COLLECTED="${COLLECTED}\n- system_build.prop ❌ not found"
+              [ -z "$result" ] && echo "❌ system/build.prop not found"
+              COLLECTED="${COLLECTED}\n- system_build.prop ❌ not found or empty"
             fi
           else
             echo "⏭️ Skipping system build.prop (not selected)"
@@ -164,13 +179,12 @@ jobs:
               # Some dumps place system_ext inside system/
               result=$(find $SEARCH_DIR -path "*/system/system_ext/build.prop" -type f 2>/dev/null | head -1)
             fi
-            if [ -n "$result" ]; then
-              cp "$result" upload_files/system_ext_build.prop
+            if [ -n "$result" ] && safe_copy "$result" upload_files/system_ext_build.prop "system_ext/build.prop"; then
               COLLECTED="${COLLECTED}\n- system_ext_build.prop ✅"
               echo "✅ system_ext/build.prop collected from: $result"
             else
-              echo "❌ system_ext/build.prop not found"
-              COLLECTED="${COLLECTED}\n- system_ext_build.prop ❌ not found"
+              [ -z "$result" ] && echo "❌ system_ext/build.prop not found"
+              COLLECTED="${COLLECTED}\n- system_ext_build.prop ❌ not found or empty"
             fi
           else
             echo "⏭️ Skipping system_ext build.prop (not selected)"
@@ -188,13 +202,11 @@ jobs:
               result=$(find $SEARCH_DIR -path "*/${partition}/etc/selinux" -type d 2>/dev/null | head -1)
               if [ -n "$result" ]; then
                 mkdir -p /tmp/selinux_staging/${partition}_selinux
-                # rsync handles broken symlinks more gracefully than cp -rL
                 if command -v rsync &>/dev/null; then
                   rsync -rL --ignore-errors "$result"/ /tmp/selinux_staging/${partition}_selinux/ 2>/dev/null || true
                 else
                   cp -rL "$result"/. /tmp/selinux_staging/${partition}_selinux/ 2>/dev/null || true
                 fi
-                # Only mark found if destination actually has files
                 if find /tmp/selinux_staging/${partition}_selinux -type f 2>/dev/null | grep -q .; then
                   SELINUX_FOUND=true
                   echo "✅ Found ${partition} selinux"
@@ -228,13 +240,12 @@ jobs:
             if [ -z "$result" ]; then
               result=$(find $SEARCH_DIR -iname "framework.jar" -type f 2>/dev/null | head -1)
             fi
-            if [ -n "$result" ]; then
-              cp "$result" upload_files/framework.jar
+            if [ -n "$result" ] && safe_copy "$result" upload_files/framework.jar "framework.jar"; then
               COLLECTED="${COLLECTED}\n- framework.jar ✅ ($(du -h upload_files/framework.jar | cut -f1))"
               echo "✅ framework.jar collected"
             else
-              echo "❌ framework.jar not found"
-              COLLECTED="${COLLECTED}\n- framework.jar ❌ not found"
+              [ -z "$result" ] && echo "❌ framework.jar not found"
+              COLLECTED="${COLLECTED}\n- framework.jar ❌ not found or empty"
             fi
           else
             echo "⏭️ Skipping framework.jar (not selected)"
@@ -248,13 +259,12 @@ jobs:
             if [ -z "$result" ]; then
               result=$(find $SEARCH_DIR -iname "services.jar" -type f 2>/dev/null | head -1)
             fi
-            if [ -n "$result" ]; then
-              cp "$result" upload_files/services.jar
+            if [ -n "$result" ] && safe_copy "$result" upload_files/services.jar "services.jar"; then
               COLLECTED="${COLLECTED}\n- services.jar ✅ ($(du -h upload_files/services.jar | cut -f1))"
               echo "✅ services.jar collected"
             else
-              echo "❌ services.jar not found"
-              COLLECTED="${COLLECTED}\n- services.jar ❌ not found"
+              [ -z "$result" ] && echo "❌ services.jar not found"
+              COLLECTED="${COLLECTED}\n- services.jar ❌ not found or empty"
             fi
           else
             echo "⏭️ Skipping services.jar (not selected)"
@@ -279,8 +289,7 @@ jobs:
 
             for pattern in "${SETTINGS_PATTERNS[@]}"; do
               result=$(find $SEARCH_DIR -path "$pattern" -type f 2>/dev/null | head -1)
-              if [ -n "$result" ]; then
-                cp "$result" upload_files/Settings.apk
+              if [ -n "$result" ] && safe_copy "$result" upload_files/Settings.apk "Settings.apk"; then
                 COLLECTED="${COLLECTED}\n- Settings.apk ✅ (from: $result)"
                 echo "✅ Settings.apk found at: $result"
                 SETTINGS_FOUND=true
@@ -291,8 +300,7 @@ jobs:
             # Last resort: case-insensitive search
             if [ "$SETTINGS_FOUND" = false ]; then
               result=$(find $SEARCH_DIR -iname "settings.apk" -type f 2>/dev/null | head -1)
-              if [ -n "$result" ]; then
-                cp "$result" upload_files/Settings.apk
+              if [ -n "$result" ] && safe_copy "$result" upload_files/Settings.apk "Settings.apk (fallback)"; then
                 COLLECTED="${COLLECTED}\n- Settings.apk ✅ (fallback: $result)"
                 echo "✅ Settings.apk found via fallback: $result"
                 SETTINGS_FOUND=true
@@ -317,7 +325,6 @@ jobs:
             ODM_DIR=$(find $SEARCH_DIR -maxdepth 3 -name "odm" -type d 2>/dev/null | head -1)
 
             if [ -n "$ODM_DIR" ]; then
-              # Try rsync first for better symlink + broken-link handling
               if command -v rsync &>/dev/null; then
                 rsync -rL --ignore-errors "$ODM_DIR"/ /tmp/odm_staging/ 2>/dev/null || true
               else
@@ -367,6 +374,28 @@ jobs:
           fi
 
           echo "✅ Ready to upload $FILE_COUNT file(s)"
+
+      - name: Print Build Props
+        # Always runs — content is visible in logs even if the release step fails
+        if: always()
+        run: |
+          echo "========================================="
+          echo "          BUILD PROP CONTENTS"
+          echo "========================================="
+
+          for label in "vendor_build.prop" "system_build.prop" "system_ext_build.prop"; do
+            path="upload_files/${label}"
+            if [ -f "$path" ]; then
+              echo ""
+              echo "───────────────────────────────────────"
+              echo "  📄 ${label}"
+              echo "───────────────────────────────────────"
+              cat "$path"
+            fi
+          done
+
+          echo ""
+          echo "========================================="
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
