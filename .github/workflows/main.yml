@@ -15,6 +15,16 @@ on:
         type: boolean
         required: false
         default: true
+      upload_system_build_prop:
+        description: 'Upload system build.prop'
+        type: boolean
+        required: false
+        default: true
+      upload_system_ext_build_prop:
+        description: 'Upload system_ext build.prop'
+        type: boolean
+        required: false
+        default: true
       upload_selinux:
         description: 'Upload SELinux policies (all partitions)'
         type: boolean
@@ -96,6 +106,9 @@ jobs:
           echo "=== ODM structure ==="
           find DumprX/out -path "*/odm/*" -type f 2>/dev/null | head -20 || echo "No ODM files"
           find DumprX/out -path "*/odm/*" -type l 2>/dev/null | head -20 || echo "No ODM symlinks"
+          echo ""
+          echo "=== All build.prop files ==="
+          find DumprX/out -name "build.prop" -type f 2>/dev/null || echo "No build.prop files found"
 
       - name: Collect and Package Files
         run: |
@@ -121,19 +134,74 @@ jobs:
           fi
 
           # ========================
-          # 2. SELINUX POLICIES
+          # 2. SYSTEM BUILD.PROP
+          # ========================
+          if [ "${{ github.event.inputs.upload_system_build_prop }}" = "true" ]; then
+            # Prefer the file directly under system/, not system/system/ (mounted root quirk)
+            result=$(find $SEARCH_DIR -path "*/system/build.prop" -not -path "*/system/system/build.prop" -type f 2>/dev/null | head -1)
+            if [ -z "$result" ]; then
+              # Fallback: accept system/system/build.prop for devices with nested system mount
+              result=$(find $SEARCH_DIR -path "*/system/system/build.prop" -type f 2>/dev/null | head -1)
+            fi
+            if [ -n "$result" ]; then
+              cp "$result" upload_files/system_build.prop
+              COLLECTED="${COLLECTED}\n- system_build.prop ✅"
+              echo "✅ system/build.prop collected from: $result"
+            else
+              echo "❌ system/build.prop not found"
+              COLLECTED="${COLLECTED}\n- system_build.prop ❌ not found"
+            fi
+          else
+            echo "⏭️ Skipping system build.prop (not selected)"
+          fi
+
+          # ========================
+          # 3. SYSTEM_EXT BUILD.PROP
+          # ========================
+          if [ "${{ github.event.inputs.upload_system_ext_build_prop }}" = "true" ]; then
+            result=$(find $SEARCH_DIR -path "*/system_ext/build.prop" -type f 2>/dev/null | head -1)
+            if [ -z "$result" ]; then
+              # Some dumps place system_ext inside system/
+              result=$(find $SEARCH_DIR -path "*/system/system_ext/build.prop" -type f 2>/dev/null | head -1)
+            fi
+            if [ -n "$result" ]; then
+              cp "$result" upload_files/system_ext_build.prop
+              COLLECTED="${COLLECTED}\n- system_ext_build.prop ✅"
+              echo "✅ system_ext/build.prop collected from: $result"
+            else
+              echo "❌ system_ext/build.prop not found"
+              COLLECTED="${COLLECTED}\n- system_ext_build.prop ❌ not found"
+            fi
+          else
+            echo "⏭️ Skipping system_ext build.prop (not selected)"
+          fi
+
+          # ========================
+          # 4. SELINUX POLICIES
           # ========================
           if [ "${{ github.event.inputs.upload_selinux }}" = "true" ]; then
             SELINUX_FOUND=false
+            rm -rf /tmp/selinux_staging
             mkdir -p /tmp/selinux_staging
 
             for partition in vendor system system_ext product; do
               result=$(find $SEARCH_DIR -path "*/${partition}/etc/selinux" -type d 2>/dev/null | head -1)
               if [ -n "$result" ]; then
                 mkdir -p /tmp/selinux_staging/${partition}_selinux
-                cp -rL "$result"/. /tmp/selinux_staging/${partition}_selinux/ 2>/dev/null || true
-                SELINUX_FOUND=true
-                echo "✅ Found ${partition} selinux"
+                # rsync handles broken symlinks more gracefully than cp -rL
+                if command -v rsync &>/dev/null; then
+                  rsync -rL --ignore-errors "$result"/ /tmp/selinux_staging/${partition}_selinux/ 2>/dev/null || true
+                else
+                  cp -rL "$result"/. /tmp/selinux_staging/${partition}_selinux/ 2>/dev/null || true
+                fi
+                # Only mark found if destination actually has files
+                if find /tmp/selinux_staging/${partition}_selinux -type f 2>/dev/null | grep -q .; then
+                  SELINUX_FOUND=true
+                  echo "✅ Found ${partition} selinux"
+                else
+                  echo "⚠️ ${partition} selinux dir exists but no files resolved"
+                  rm -rf /tmp/selinux_staging/${partition}_selinux
+                fi
               fi
             done
 
@@ -142,7 +210,7 @@ jobs:
               zip -r selinux_all.zip ./*
               cp selinux_all.zip $OLDPWD/upload_files/selinux_all.zip
               cd $OLDPWD
-              COLLECTED="${COLLECTED}\n- selinux_all.zip ✅"
+              COLLECTED="${COLLECTED}\n- selinux_all.zip ✅ ($(du -h upload_files/selinux_all.zip | cut -f1))"
               echo "✅ selinux_all.zip created ($(du -h upload_files/selinux_all.zip | cut -f1))"
             else
               echo "❌ No SELinux policies found"
@@ -153,7 +221,7 @@ jobs:
           fi
 
           # ========================
-          # 3. FRAMEWORK.JAR
+          # 5. FRAMEWORK.JAR
           # ========================
           if [ "${{ github.event.inputs.upload_framework }}" = "true" ]; then
             result=$(find $SEARCH_DIR -path "*/system/framework/framework.jar" -type f 2>/dev/null | head -1)
@@ -173,7 +241,7 @@ jobs:
           fi
 
           # ========================
-          # 4. SERVICES.JAR
+          # 6. SERVICES.JAR
           # ========================
           if [ "${{ github.event.inputs.upload_services }}" = "true" ]; then
             result=$(find $SEARCH_DIR -path "*/system/framework/services.jar" -type f 2>/dev/null | head -1)
@@ -193,7 +261,7 @@ jobs:
           fi
 
           # ========================
-          # 5. SETTINGS.APK
+          # 7. SETTINGS.APK
           # ========================
           if [ "${{ github.event.inputs.upload_settings }}" = "true" ]; then
             SETTINGS_FOUND=false
@@ -240,44 +308,33 @@ jobs:
           fi
 
           # ========================
-          # 6. ODM PARTITION
+          # 8. ODM PARTITION
           # ========================
           if [ "${{ github.event.inputs.upload_odm }}" = "true" ]; then
-            ODM_DIR=""
-            result=$(find $SEARCH_DIR -maxdepth 3 -name "odm" -type d 2>/dev/null | head -1)
-            if [ -n "$result" ]; then
-              ODM_DIR="$result"
-            fi
+            rm -rf /tmp/odm_staging
+            mkdir -p /tmp/odm_staging
+
+            ODM_DIR=$(find $SEARCH_DIR -maxdepth 3 -name "odm" -type d 2>/dev/null | head -1)
 
             if [ -n "$ODM_DIR" ]; then
-              # Check if ODM has real files (not just symlinks)
-              REAL_FILES=$(find "$ODM_DIR" -type f 2>/dev/null | head -1)
-              if [ -n "$REAL_FILES" ]; then
-                mkdir -p /tmp/odm_staging
+              # Try rsync first for better symlink + broken-link handling
+              if command -v rsync &>/dev/null; then
+                rsync -rL --ignore-errors "$ODM_DIR"/ /tmp/odm_staging/ 2>/dev/null || true
+              else
                 cp -rL "$ODM_DIR"/. /tmp/odm_staging/ 2>/dev/null || true
+              fi
+
+              FILE_COUNT=$(find /tmp/odm_staging -type f 2>/dev/null | wc -l)
+              if [ "$FILE_COUNT" -gt 0 ]; then
                 cd /tmp/odm_staging
                 zip -r odm.zip . > /dev/null 2>&1
                 cp odm.zip $OLDPWD/upload_files/odm.zip
                 cd $OLDPWD
                 COLLECTED="${COLLECTED}\n- odm.zip ✅ ($(du -h upload_files/odm.zip | cut -f1))"
-                echo "✅ odm.zip created with real files"
+                echo "✅ odm.zip created ($FILE_COUNT files, $(du -h upload_files/odm.zip | cut -f1))"
               else
-                echo "⚠️ ODM directory found but contains only symlinks or is empty"
-                # Try following symlinks
-                mkdir -p /tmp/odm_staging
-                cp -rL "$ODM_DIR"/. /tmp/odm_staging/ 2>/dev/null || true
-                FILE_COUNT=$(find /tmp/odm_staging -type f 2>/dev/null | wc -l)
-                if [ "$FILE_COUNT" -gt 0 ]; then
-                  cd /tmp/odm_staging
-                  zip -r odm.zip . > /dev/null 2>&1
-                  cp odm.zip $OLDPWD/upload_files/odm.zip
-                  cd $OLDPWD
-                  COLLECTED="${COLLECTED}\n- odm.zip ✅ (symlinks resolved, $(du -h upload_files/odm.zip | cut -f1))"
-                  echo "✅ odm.zip created (symlinks resolved)"
-                else
-                  echo "❌ ODM directory is truly empty"
-                  COLLECTED="${COLLECTED}\n- odm.zip ❌ empty"
-                fi
+                echo "❌ ODM directory resolved to zero files"
+                COLLECTED="${COLLECTED}\n- odm.zip ❌ empty after resolving symlinks"
               fi
             else
               echo "❌ ODM directory not found"
@@ -301,7 +358,6 @@ jobs:
           ls -lh upload_files/ || true
           echo ""
 
-          # Count actual files (not directories)
           FILE_COUNT=$(find upload_files -maxdepth 1 -type f 2>/dev/null | wc -l)
           echo "Total uploadable files: $FILE_COUNT"
 
@@ -324,7 +380,9 @@ jobs:
             **Run:** #${{ github.run_number }}
 
             ### Selected Uploads
-            - Build.prop: ${{ github.event.inputs.upload_build_prop }}
+            - Vendor build.prop: ${{ github.event.inputs.upload_build_prop }}
+            - System build.prop: ${{ github.event.inputs.upload_system_build_prop }}
+            - System_ext build.prop: ${{ github.event.inputs.upload_system_ext_build_prop }}
             - SELinux: ${{ github.event.inputs.upload_selinux }}
             - framework.jar: ${{ github.event.inputs.upload_framework }}
             - services.jar: ${{ github.event.inputs.upload_services }}
@@ -338,3 +396,4 @@ jobs:
           make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
