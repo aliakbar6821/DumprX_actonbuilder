@@ -74,41 +74,41 @@ jobs:
       - name: Clone DumprX fork
         # Clones YOUR fork of DumprX — change the URL to your fork once created
         run: |
-          git clone https://github.com/${{ github.repository_owner }}/DumprX --depth=1
+          git clone https://github.com/${{ github.repository_owner }}/DumprX_actonbuilder --depth=1
           echo "✅ Cloned DumprX fork"
 
       - name: Install DumprX Requirements
         run: |
-          cd DumprX
+          cd DumprX_actonbuilder
           bash setup.sh
 
       - name: Run DumprX
         run: |
-          cd DumprX
+          cd DumprX_actonbuilder
           bash dumper.sh "$LINK"
 
       - name: Debug - Show Dump Structure
         run: |
           echo "=== Top-level dump structure ==="
-          ls -la DumprX/out/ || echo "No out directory"
+          ls -la DumprX_actonbuilder/out/ || echo "No out directory"
           echo ""
           echo "=== All build.prop files ==="
-          find DumprX/out -name "build.prop" -type f 2>/dev/null || echo "No build.prop files found"
+          find DumprX_actonbuilder/out -name "build.prop" -type f 2>/dev/null || echo "No build.prop files found"
           echo ""
           echo "=== Looking for Settings.apk ==="
-          find DumprX/out -iname "Settings.apk" -type f 2>/dev/null || echo "No Settings.apk found"
-          find DumprX/out -iname "Settings*.apk" -type f 2>/dev/null || true
+          find DumprX_actonbuilder/out -iname "Settings.apk" -type f 2>/dev/null || echo "No Settings.apk found"
+          find DumprX_actonbuilder/out -iname "Settings*.apk" -type f 2>/dev/null || true
           echo ""
           echo "=== Looking for priv-app APKs ==="
-          find DumprX/out -path "*/priv-app/*" -name "*.apk" -type f 2>/dev/null | head -20 || echo "No priv-app APKs"
+          find DumprX_actonbuilder/out -path "*/priv-app/*" -name "*.apk" -type f 2>/dev/null | head -20 || echo "No priv-app APKs"
           echo ""
           echo "=== ODM structure ==="
-          find DumprX/out -path "*/odm/*" -type f 2>/dev/null | head -20 || echo "No ODM files"
+          find DumprX_actonbuilder/out -path "*/odm/*" -type f 2>/dev/null | head -20 || echo "No ODM files"
 
       - name: Collect and Package Files
         run: |
           mkdir -p upload_files
-          SEARCH_DIR="DumprX/out"
+          SEARCH_DIR="DumprX_actonbuilder/out"
           COLLECTED=""
 
           # Helper: copy a file only if it exists AND is non-empty.
