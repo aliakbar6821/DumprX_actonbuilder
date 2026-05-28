@@ -1,4 +1,4 @@
-name: ROM Dumper new
+name: ROM Dumper v2
 
 on:
   workflow_dispatch:
@@ -52,7 +52,6 @@ on:
         default: true
 
 env:
-  LINK: ${{ github.event.inputs.link }}
   TZ: Asia/Kolkata
 
 jobs:
@@ -75,303 +74,304 @@ jobs:
         uses: rokibhasansagar/slimhub_actions@main
 
       - name: Install DumprX Requirements
-        run: bash setup.sh
+        run: |
+          bash setup.sh
+          # Make uv available for the rest of the workflow — setup.sh installs it
+          # to ~/.local/bin but doesn't export the PATH for subsequent steps.
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Run DumprX
-        run: bash dumper.sh "$LINK"
+        run: bash dumper.sh "${{ github.event.inputs.link }}"
+
+      # -----------------------------------------------------------------------
+      # dumper.sh writes everything to  <repo-root>/out/
+      # Flat layout:   out/vendor/build.prop
+      #                out/system/build.prop   (or out/system/system/build.prop
+      #                                            on nested-system devices)
+      #                out/system_ext/build.prop
+      #                out/system/framework/framework.jar
+      #                out/odm/  (directory)
+      # -----------------------------------------------------------------------
 
       - name: Debug - Show Dump Structure
+        if: always()
         run: |
-          echo "=== Top-level dump structure ==="
-          ls -la out/ || echo "No out directory"
+          echo "=== Top-level out/ structure ==="
+          ls -la out/ 2>/dev/null || echo "No out/ directory"
           echo ""
           echo "=== All build.prop files ==="
-          find out -name "build.prop" -type f 2>/dev/null || echo "No build.prop files found"
+          find out -name "build.prop" -type f 2>/dev/null || echo "None found"
           echo ""
-          echo "=== Looking for Settings.apk ==="
-          find out -iname "Settings.apk" -type f 2>/dev/null || echo "No Settings.apk found"
-          find out -iname "Settings*.apk" -type f 2>/dev/null || true
+          echo "=== Looking for Settings*.apk ==="
+          find out -iname "Settings*.apk" -type f 2>/dev/null || echo "None found"
           echo ""
-          echo "=== Looking for priv-app APKs ==="
-          find out -path "*/priv-app/*" -name "*.apk" -type f 2>/dev/null | head -20 || echo "No priv-app APKs"
+          echo "=== Looking for framework.jar / services.jar ==="
+          find out -name "framework.jar" -o -name "services.jar" 2>/dev/null || echo "None found"
           echo ""
-          echo "=== ODM structure ==="
-          find out -path "*/odm/*" -type f 2>/dev/null | head -20 || echo "No ODM files"
+          echo "=== ODM top-level contents ==="
+          ls -la out/odm/ 2>/dev/null || echo "No out/odm/ directory"
 
       - name: Collect and Package Files
         run: |
+          set -euo pipefail
           mkdir -p upload_files
-          SEARCH_DIR="out"
+          OUTDIR="out"
           COLLECTED=""
 
-          # Helper: copy a file only if it exists AND is non-empty.
-          # Returns 0 on success, 1 if skipped.
+          # ----------------------------------------------------------------
+          # safe_copy <src> <dst> <label>
+          # Returns 0 on success, 1 if the source is missing or 0-byte.
+          # ----------------------------------------------------------------
           safe_copy() {
             local src="$1" dst="$2" label="$3"
-            if [ ! -f "$src" ]; then
+            if [[ ! -f "$src" ]]; then
+              echo "❌ $label — not found at: $src"
               return 1
             fi
             local sz
             sz=$(stat -c%s "$src" 2>/dev/null || echo 0)
-            if [ "$sz" -eq 0 ]; then
-              echo "⚠️  $label — file is 0 bytes (partition extraction likely failed). Skipping."
+            if [[ "$sz" -eq 0 ]]; then
+              echo "⚠️  $label — file is 0 bytes. Skipping."
               return 1
             fi
             cp "$src" "$dst"
             return 0
           }
 
+          # ----------------------------------------------------------------
+          # find_file <label> <pattern…>
+          # Tries each glob pattern in order; prints the first non-empty hit.
+          # ----------------------------------------------------------------
+          find_file() {
+            local label="$1"; shift
+            local result
+            for pattern in "$@"; do
+              result=$(find "$OUTDIR" -path "$pattern" -type f 2>/dev/null | head -1)
+              if [[ -n "$result" ]]; then
+                echo "$result"
+                return 0
+              fi
+            done
+            echo "❌ $label — not found anywhere" >&2
+            return 1
+          }
+
           # ========================
           # 1. VENDOR BUILD.PROP
           # ========================
-          if [ "${{ github.event.inputs.upload_build_prop }}" = "true" ]; then
-            result=$(find $SEARCH_DIR -path "*/vendor/build.prop" -type f 2>/dev/null | head -1)
-            if [ -n "$result" ] && safe_copy "$result" upload_files/vendor_build.prop "vendor/build.prop"; then
-              COLLECTED="${COLLECTED}\n- vendor_build.prop ✅"
-              echo "✅ vendor/build.prop collected"
-            else
-              [ -z "$result" ] && echo "❌ vendor/build.prop not found"
-              COLLECTED="${COLLECTED}\n- vendor_build.prop ❌ not found or empty"
-            fi
+          if [[ "${{ github.event.inputs.upload_build_prop }}" == "true" ]]; then
+            result=$(find_file "vendor/build.prop" \
+              "*/vendor/build.prop") && \
+            safe_copy "$result" upload_files/vendor_build.prop "vendor/build.prop" && \
+            COLLECTED="${COLLECTED}\n- vendor_build.prop ✅" && \
+            echo "✅ vendor/build.prop → upload_files/vendor_build.prop" || \
+            COLLECTED="${COLLECTED}\n- vendor_build.prop ❌"
           else
-            echo "⏭️ Skipping vendor build.prop (not selected)"
+            echo "⏭️  Skipping vendor build.prop"
           fi
 
           # ========================
           # 2. SYSTEM BUILD.PROP
           # ========================
-          if [ "${{ github.event.inputs.upload_system_build_prop }}" = "true" ]; then
-            # DumprX outputs to out/system/ directly — prefer that over out/system/system/
-            result=$(find $SEARCH_DIR -path "*/system/build.prop" -not -path "*/system/system/build.prop" -type f 2>/dev/null | head -1)
-            if [ -z "$result" ]; then
-              # Fallback: some devices have a nested system/system mount layout
-              result=$(find $SEARCH_DIR -path "*/system/system/build.prop" -type f 2>/dev/null | head -1)
-            fi
-            if [ -n "$result" ] && safe_copy "$result" upload_files/system_build.prop "system/build.prop"; then
-              COLLECTED="${COLLECTED}\n- system_build.prop ✅"
-              echo "✅ system/build.prop collected from: $result"
-            else
-              [ -z "$result" ] && echo "❌ system/build.prop not found"
-              COLLECTED="${COLLECTED}\n- system_build.prop ❌ not found or empty"
-            fi
+          if [[ "${{ github.event.inputs.upload_system_build_prop }}" == "true" ]]; then
+            # Prefer the flat layout (out/system/build.prop); fall back to
+            # nested (out/system/system/build.prop) used by some OEMs.
+            result=$(find_file "system/build.prop" \
+              "*/system/build.prop" \
+              "*/system/system/build.prop") && \
+            safe_copy "$result" upload_files/system_build.prop "system/build.prop" && \
+            COLLECTED="${COLLECTED}\n- system_build.prop ✅ (from: $result)" && \
+            echo "✅ system/build.prop → upload_files/system_build.prop" || \
+            COLLECTED="${COLLECTED}\n- system_build.prop ❌"
           else
-            echo "⏭️ Skipping system build.prop (not selected)"
+            echo "⏭️  Skipping system build.prop"
           fi
 
           # ========================
           # 3. SYSTEM_EXT BUILD.PROP
           # ========================
-          if [ "${{ github.event.inputs.upload_system_ext_build_prop }}" = "true" ]; then
-            result=$(find $SEARCH_DIR -path "*/system_ext/build.prop" -type f 2>/dev/null | head -1)
-            if [ -z "$result" ]; then
-              result=$(find $SEARCH_DIR -path "*/system/system_ext/build.prop" -type f 2>/dev/null | head -1)
-            fi
-            if [ -n "$result" ] && safe_copy "$result" upload_files/system_ext_build.prop "system_ext/build.prop"; then
-              COLLECTED="${COLLECTED}\n- system_ext_build.prop ✅"
-              echo "✅ system_ext/build.prop collected from: $result"
-            else
-              [ -z "$result" ] && echo "❌ system_ext/build.prop not found"
-              COLLECTED="${COLLECTED}\n- system_ext_build.prop ❌ not found or empty"
-            fi
+          if [[ "${{ github.event.inputs.upload_system_ext_build_prop }}" == "true" ]]; then
+            result=$(find_file "system_ext/build.prop" \
+              "*/system_ext/build.prop" \
+              "*/system/system_ext/build.prop") && \
+            safe_copy "$result" upload_files/system_ext_build.prop "system_ext/build.prop" && \
+            COLLECTED="${COLLECTED}\n- system_ext_build.prop ✅ (from: $result)" && \
+            echo "✅ system_ext/build.prop → upload_files/system_ext_build.prop" || \
+            COLLECTED="${COLLECTED}\n- system_ext_build.prop ❌"
           else
-            echo "⏭️ Skipping system_ext build.prop (not selected)"
+            echo "⏭️  Skipping system_ext build.prop"
           fi
 
           # ========================
           # 4. SELINUX POLICIES
           # ========================
-          if [ "${{ github.event.inputs.upload_selinux }}" = "true" ]; then
-            SELINUX_FOUND=false
+          if [[ "${{ github.event.inputs.upload_selinux }}" == "true" ]]; then
             rm -rf /tmp/selinux_staging
             mkdir -p /tmp/selinux_staging
+            SELINUX_FOUND=false
 
             for partition in vendor system system_ext product; do
-              result=$(find $SEARCH_DIR -path "*/${partition}/etc/selinux" -type d 2>/dev/null | head -1)
-              if [ -n "$result" ]; then
-                mkdir -p /tmp/selinux_staging/${partition}_selinux
-                if command -v rsync &>/dev/null; then
-                  rsync -rL --ignore-errors "$result"/ /tmp/selinux_staging/${partition}_selinux/ 2>/dev/null || true
-                else
-                  cp -rL "$result"/. /tmp/selinux_staging/${partition}_selinux/ 2>/dev/null || true
-                fi
-                if find /tmp/selinux_staging/${partition}_selinux -type f 2>/dev/null | grep -q .; then
+              selinux_dir=$(find "$OUTDIR" -path "*/${partition}/etc/selinux" -type d 2>/dev/null | head -1)
+              if [[ -n "$selinux_dir" ]]; then
+                dest="/tmp/selinux_staging/${partition}_selinux"
+                mkdir -p "$dest"
+                rsync -rL --ignore-errors "$selinux_dir/" "$dest/" 2>/dev/null || \
+                  cp -rL "$selinux_dir/." "$dest/" 2>/dev/null || true
+                if find "$dest" -type f -print -quit 2>/dev/null | grep -q .; then
                   SELINUX_FOUND=true
-                  echo "✅ Found ${partition} selinux"
+                  echo "✅ $partition selinux collected"
                 else
-                  echo "⚠️ ${partition} selinux dir exists but no files resolved"
-                  rm -rf /tmp/selinux_staging/${partition}_selinux
+                  echo "⚠️  $partition selinux dir exists but resolved to no files"
+                  rm -rf "$dest"
                 fi
               fi
             done
 
-            if [ "$SELINUX_FOUND" = true ]; then
-              cd /tmp/selinux_staging
-              zip -r selinux_all.zip ./*
-              cp selinux_all.zip $OLDPWD/upload_files/selinux_all.zip
-              cd $OLDPWD
-              COLLECTED="${COLLECTED}\n- selinux_all.zip ✅ ($(du -h upload_files/selinux_all.zip | cut -f1))"
-              echo "✅ selinux_all.zip created ($(du -h upload_files/selinux_all.zip | cut -f1))"
+            if [[ "$SELINUX_FOUND" == "true" ]]; then
+              ( cd /tmp/selinux_staging && zip -r selinux_all.zip ./* )
+              cp /tmp/selinux_staging/selinux_all.zip upload_files/selinux_all.zip
+              sz=$(du -h upload_files/selinux_all.zip | cut -f1)
+              COLLECTED="${COLLECTED}\n- selinux_all.zip ✅ ($sz)"
+              echo "✅ selinux_all.zip created ($sz)"
             else
               echo "❌ No SELinux policies found"
-              COLLECTED="${COLLECTED}\n- selinux_all.zip ❌ not found"
+              COLLECTED="${COLLECTED}\n- selinux_all.zip ❌"
             fi
           else
-            echo "⏭️ Skipping SELinux (not selected)"
+            echo "⏭️  Skipping SELinux"
           fi
 
           # ========================
           # 5. FRAMEWORK.JAR
           # ========================
-          if [ "${{ github.event.inputs.upload_framework }}" = "true" ]; then
-            result=$(find $SEARCH_DIR -path "*/system/framework/framework.jar" -type f 2>/dev/null | head -1)
-            if [ -z "$result" ]; then
-              result=$(find $SEARCH_DIR -iname "framework.jar" -type f 2>/dev/null | head -1)
-            fi
-            if [ -n "$result" ] && safe_copy "$result" upload_files/framework.jar "framework.jar"; then
-              COLLECTED="${COLLECTED}\n- framework.jar ✅ ($(du -h upload_files/framework.jar | cut -f1))"
-              echo "✅ framework.jar collected"
-            else
-              [ -z "$result" ] && echo "❌ framework.jar not found"
-              COLLECTED="${COLLECTED}\n- framework.jar ❌ not found or empty"
-            fi
+          if [[ "${{ github.event.inputs.upload_framework }}" == "true" ]]; then
+            result=$(find_file "framework.jar" \
+              "*/system/framework/framework.jar" \
+              "*/system/system/framework/framework.jar") && \
+            safe_copy "$result" upload_files/framework.jar "framework.jar" && \
+            sz=$(du -h upload_files/framework.jar | cut -f1) && \
+            COLLECTED="${COLLECTED}\n- framework.jar ✅ ($sz)" && \
+            echo "✅ framework.jar ($sz)" || \
+            COLLECTED="${COLLECTED}\n- framework.jar ❌"
           else
-            echo "⏭️ Skipping framework.jar (not selected)"
+            echo "⏭️  Skipping framework.jar"
           fi
 
           # ========================
           # 6. SERVICES.JAR
           # ========================
-          if [ "${{ github.event.inputs.upload_services }}" = "true" ]; then
-            result=$(find $SEARCH_DIR -path "*/system/framework/services.jar" -type f 2>/dev/null | head -1)
-            if [ -z "$result" ]; then
-              result=$(find $SEARCH_DIR -iname "services.jar" -type f 2>/dev/null | head -1)
-            fi
-            if [ -n "$result" ] && safe_copy "$result" upload_files/services.jar "services.jar"; then
-              COLLECTED="${COLLECTED}\n- services.jar ✅ ($(du -h upload_files/services.jar | cut -f1))"
-              echo "✅ services.jar collected"
-            else
-              [ -z "$result" ] && echo "❌ services.jar not found"
-              COLLECTED="${COLLECTED}\n- services.jar ❌ not found or empty"
-            fi
+          if [[ "${{ github.event.inputs.upload_services }}" == "true" ]]; then
+            result=$(find_file "services.jar" \
+              "*/system/framework/services.jar" \
+              "*/system/system/framework/services.jar") && \
+            safe_copy "$result" upload_files/services.jar "services.jar" && \
+            sz=$(du -h upload_files/services.jar | cut -f1) && \
+            COLLECTED="${COLLECTED}\n- services.jar ✅ ($sz)" && \
+            echo "✅ services.jar ($sz)" || \
+            COLLECTED="${COLLECTED}\n- services.jar ❌"
           else
-            echo "⏭️ Skipping services.jar (not selected)"
+            echo "⏭️  Skipping services.jar"
           fi
 
           # ========================
           # 7. SETTINGS.APK
           # ========================
-          if [ "${{ github.event.inputs.upload_settings }}" = "true" ]; then
+          if [[ "${{ github.event.inputs.upload_settings }}" == "true" ]]; then
             SETTINGS_FOUND=false
-
-            SETTINGS_PATTERNS=(
-              "*/system/priv-app/Settings/Settings.apk"
-              "*/system/app/Settings/Settings.apk"
-              "*/system/product/priv-app/Settings/Settings.apk"
-              "*/product/priv-app/Settings/Settings.apk"
-              "*/system_ext/priv-app/Settings/Settings.apk"
-              "*/system/priv-app/SettingsGoogle/SettingsGoogle.apk"
-              "*/product/priv-app/SettingsGoogle/SettingsGoogle.apk"
+            for pattern in \
+              "*/system/priv-app/Settings/Settings.apk" \
+              "*/system/app/Settings/Settings.apk" \
+              "*/product/priv-app/Settings/Settings.apk" \
+              "*/system/product/priv-app/Settings/Settings.apk" \
+              "*/system_ext/priv-app/Settings/Settings.apk" \
+              "*/system/priv-app/SettingsGoogle/SettingsGoogle.apk" \
+              "*/product/priv-app/SettingsGoogle/SettingsGoogle.apk" \
               "*/system_ext/priv-app/SettingsGoogle/SettingsGoogle.apk"
-            )
-
-            for pattern in "${SETTINGS_PATTERNS[@]}"; do
-              result=$(find $SEARCH_DIR -path "$pattern" -type f 2>/dev/null | head -1)
-              if [ -n "$result" ] && safe_copy "$result" upload_files/Settings.apk "Settings.apk"; then
+            do
+              result=$(find "$OUTDIR" -path "$pattern" -type f 2>/dev/null | head -1)
+              if [[ -n "$result" ]] && safe_copy "$result" upload_files/Settings.apk "Settings.apk"; then
                 COLLECTED="${COLLECTED}\n- Settings.apk ✅ (from: $result)"
-                echo "✅ Settings.apk found at: $result"
+                echo "✅ Settings.apk from: $result"
                 SETTINGS_FOUND=true
                 break
               fi
             done
-
-            if [ "$SETTINGS_FOUND" = false ]; then
-              result=$(find $SEARCH_DIR -iname "settings.apk" -type f 2>/dev/null | head -1)
-              if [ -n "$result" ] && safe_copy "$result" upload_files/Settings.apk "Settings.apk (fallback)"; then
+            if [[ "$SETTINGS_FOUND" == "false" ]]; then
+              # Last-resort case-insensitive search
+              result=$(find "$OUTDIR" -iname "settings.apk" -type f 2>/dev/null | head -1)
+              if [[ -n "$result" ]] && safe_copy "$result" upload_files/Settings.apk "Settings.apk (fallback)"; then
                 COLLECTED="${COLLECTED}\n- Settings.apk ✅ (fallback: $result)"
-                echo "✅ Settings.apk found via fallback: $result"
+                echo "✅ Settings.apk (fallback) from: $result"
                 SETTINGS_FOUND=true
               fi
             fi
-
-            if [ "$SETTINGS_FOUND" = false ]; then
-              echo "❌ Settings.apk not found anywhere"
-              COLLECTED="${COLLECTED}\n- Settings.apk ❌ not found"
+            if [[ "$SETTINGS_FOUND" == "false" ]]; then
+              echo "❌ Settings.apk not found"
+              COLLECTED="${COLLECTED}\n- Settings.apk ❌"
             fi
           else
-            echo "⏭️ Skipping Settings.apk (not selected)"
+            echo "⏭️  Skipping Settings.apk"
           fi
 
           # ========================
           # 8. ODM PARTITION
           # ========================
-          if [ "${{ github.event.inputs.upload_odm }}" = "true" ]; then
+          if [[ "${{ github.event.inputs.upload_odm }}" == "true" ]]; then
             rm -rf /tmp/odm_staging
             mkdir -p /tmp/odm_staging
+            ODM_DIR=$(find "$OUTDIR" -maxdepth 3 -name "odm" -type d 2>/dev/null | head -1)
 
-            ODM_DIR=$(find $SEARCH_DIR -maxdepth 3 -name "odm" -type d 2>/dev/null | head -1)
-
-            if [ -n "$ODM_DIR" ]; then
-              if command -v rsync &>/dev/null; then
-                rsync -rL --ignore-errors "$ODM_DIR"/ /tmp/odm_staging/ 2>/dev/null || true
-              else
-                cp -rL "$ODM_DIR"/. /tmp/odm_staging/ 2>/dev/null || true
-              fi
-
+            if [[ -n "$ODM_DIR" ]]; then
+              rsync -rL --ignore-errors "$ODM_DIR/" /tmp/odm_staging/ 2>/dev/null || \
+                cp -rL "$ODM_DIR/." /tmp/odm_staging/ 2>/dev/null || true
               FILE_COUNT=$(find /tmp/odm_staging -type f 2>/dev/null | wc -l)
-              if [ "$FILE_COUNT" -gt 0 ]; then
-                cd /tmp/odm_staging
-                zip -r odm.zip . > /dev/null 2>&1
-                cp odm.zip $OLDPWD/upload_files/odm.zip
-                cd $OLDPWD
-                COLLECTED="${COLLECTED}\n- odm.zip ✅ ($(du -h upload_files/odm.zip | cut -f1))"
-                echo "✅ odm.zip created ($FILE_COUNT files, $(du -h upload_files/odm.zip | cut -f1))"
+              if [[ "$FILE_COUNT" -gt 0 ]]; then
+                ( cd /tmp/odm_staging && zip -r odm.zip . > /dev/null 2>&1 )
+                cp /tmp/odm_staging/odm.zip upload_files/odm.zip
+                sz=$(du -h upload_files/odm.zip | cut -f1)
+                COLLECTED="${COLLECTED}\n- odm.zip ✅ ($FILE_COUNT files, $sz)"
+                echo "✅ odm.zip created ($FILE_COUNT files, $sz)"
               else
                 echo "❌ ODM directory resolved to zero files"
-                COLLECTED="${COLLECTED}\n- odm.zip ❌ empty after resolving symlinks"
+                COLLECTED="${COLLECTED}\n- odm.zip ❌ empty"
               fi
             else
               echo "❌ ODM directory not found"
               COLLECTED="${COLLECTED}\n- odm.zip ❌ not found"
             fi
           else
-            echo "⏭️ Skipping ODM (not selected)"
+            echo "⏭️  Skipping ODM"
           fi
 
           # ========================
-          # FINAL CHECK
+          # FINAL SUMMARY
           # ========================
           echo ""
           echo "========================================="
-          echo "       COLLECTION SUMMARY"
+          echo "          COLLECTION SUMMARY"
           echo "========================================="
           echo -e "$COLLECTED"
           echo "========================================="
           echo ""
-          echo "=== FILES READY FOR UPLOAD ==="
           ls -lh upload_files/ || true
-          echo ""
 
           FILE_COUNT=$(find upload_files -maxdepth 1 -type f 2>/dev/null | wc -l)
-          echo "Total uploadable files: $FILE_COUNT"
-
-          if [ "$FILE_COUNT" -eq 0 ]; then
-            echo "❌ No files were collected! Check ROM dump output."
+          echo "Total files ready for upload: $FILE_COUNT"
+          if [[ "$FILE_COUNT" -eq 0 ]]; then
+            echo "❌ No files collected — check the dump output above."
             exit 1
           fi
-
           echo "✅ Ready to upload $FILE_COUNT file(s)"
 
       - name: Print Build Props
-        # Always runs so content is visible in logs even if the release step fails
         if: always()
         run: |
           echo "========================================="
           echo "          BUILD PROP CONTENTS"
           echo "========================================="
-
-          for label in "vendor_build.prop" "system_build.prop" "system_ext_build.prop"; do
+          for label in vendor_build.prop system_build.prop system_ext_build.prop; do
             path="upload_files/${label}"
-            if [ -f "$path" ]; then
+            if [[ -f "$path" ]]; then
               echo ""
               echo "───────────────────────────────────────"
               echo "  📄 ${label}"
@@ -379,7 +379,6 @@ jobs:
               cat "$path"
             fi
           done
-
           echo ""
           echo "========================================="
 
@@ -411,3 +410,4 @@ jobs:
           make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
