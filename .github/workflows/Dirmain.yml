@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'Direct download URL'
+        description: 'Direct download URL or GoFile page link'
         required: true
       filename:
         description: 'Output filename (leave blank to use original filename)'
@@ -31,18 +31,69 @@ jobs:
         if: ${{ inputs.upload_target == 'googledrive' || inputs.upload_target == 'both' }}
         run: echo "::add-mask::${{ github.event.inputs.rclone_token }}"
 
+      - name: Resolve GoFile direct link
+        id: resolveurl
+        run: |
+          URL="${{ github.event.inputs.url }}"
+          if echo "$URL" | grep -q "gofile.io/d/"; then
+            CONTENT_ID=$(echo "$URL" | grep -oP '(?<=gofile\.io/d/)[a-zA-Z0-9-]+')
+            echo "Detected GoFile page link, fetching direct URL..."
+
+            # Get guest token
+            TOKEN=$(curl -s https://api.gofile.io/accounts | python3 -c "
+          import sys, json
+          print(json.load(sys.stdin)['data']['token'])
+          ")
+            echo "Got GoFile token"
+
+            # Get file info
+            RESPONSE=$(curl -s "https://api.gofile.io/contents/$CONTENT_ID?wt=4fd6sg89d7s6&cache=true" \
+              -H "Authorization: Bearer $TOKEN")
+            echo "GoFile API response:"
+            echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d, indent=2))" || echo "$RESPONSE"
+
+            # Extract direct link and filename
+            DIRECT_URL=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          children = data['data']['children']
+          first = list(children.values())[0]
+          print(first['link'])
+          ")
+            REAL_NAME=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          children = data['data']['children']
+          first = list(children.values())[0]
+          print(first['name'])
+          ")
+
+            echo "Direct URL: $DIRECT_URL"
+            echo "Real filename: $REAL_NAME"
+            echo "url=$DIRECT_URL" >> $GITHUB_OUTPUT
+            echo "gofile_token=$TOKEN" >> $GITHUB_OUTPUT
+            echo "real_name=$REAL_NAME" >> $GITHUB_OUTPUT
+          else
+            echo "url=$URL" >> $GITHUB_OUTPUT
+            echo "gofile_token=" >> $GITHUB_OUTPUT
+            echo "real_name=" >> $GITHUB_OUTPUT
+          fi
+
       - name: Resolve filename
         id: resolve
         run: |
           INPUT_NAME="${{ github.event.inputs.filename }}"
-          URL="${{ github.event.inputs.url }}"
-          if [ -z "$INPUT_NAME" ]; then
+          REAL_NAME="${{ steps.resolveurl.outputs.real_name }}"
+          URL="${{ steps.resolveurl.outputs.url }}"
+          if [ -n "$INPUT_NAME" ]; then
+            RESOLVED="$INPUT_NAME"
+          elif [ -n "$REAL_NAME" ]; then
+            RESOLVED="$REAL_NAME"
+          else
             RESOLVED=$(basename "${URL%%\?*}")
             if [ -z "$RESOLVED" ] || [ "$RESOLVED" = "/" ]; then
               RESOLVED="downloaded_file"
             fi
-          else
-            RESOLVED="$INPUT_NAME"
           fi
           echo "filename=$RESOLVED" >> $GITHUB_OUTPUT
           echo "Resolved filename: $RESOLVED"
@@ -50,10 +101,31 @@ jobs:
       - name: Download file with aria2
         run: |
           sudo apt install -y aria2
-          aria2c -x16 -s16 -k1M --check-certificate=false \
+          DL_URL="${{ steps.resolveurl.outputs.url }}"
+          GF_TOKEN="${{ steps.resolveurl.outputs.gofile_token }}"
+
+          EXTRA_HEADER=""
+          if [ -n "$GF_TOKEN" ]; then
+            EXTRA_HEADER="--header=Authorization: Bearer $GF_TOKEN"
+          fi
+
+          aria2c -x16 -s16 -k1M \
+            --check-certificate=false \
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            $EXTRA_HEADER \
             -o "${{ steps.resolve.outputs.filename }}" \
-            "${{ github.event.inputs.url }}"
+            "$DL_URL"
+
+          echo ""
+          echo "=== Downloaded File ==="
           ls -lh "${{ steps.resolve.outputs.filename }}"
+
+          FILESIZE=$(stat -c%s "${{ steps.resolve.outputs.filename }}")
+          if [ "$FILESIZE" -lt 1048576 ]; then
+            echo "ERROR: File too small ($FILESIZE bytes), download likely failed!"
+            cat "${{ steps.resolve.outputs.filename }}"
+            exit 1
+          fi
 
       # ── GoFile ────────────────────────────────────────────────
       - name: Clone GoFile Upload script
@@ -88,9 +160,24 @@ jobs:
       - name: Upload to Google Drive
         if: ${{ inputs.upload_target == 'googledrive' || inputs.upload_target == 'both' }}
         run: |
-          rclone copy "${{ steps.resolve.outputs.filename }}" gd: \
+          FILE="${{ steps.resolve.outputs.filename }}"
+          rclone copy "$FILE" gd: \
             --progress \
             --transfers 4
           echo ""
           echo "=== Google Drive Upload Done ==="
-          rclone ls gd: | grep "${{ steps.resolve.outputs.filename }}"
+          rclone ls gd: | grep "$FILE"
+          echo ""
+          echo "=== Google Drive Link ==="
+          FILE_ID=$(rclone lsjson gd: | python3 -c "
+          import sys, json
+          files = json.load(sys.stdin)
+          for f in files:
+              if f['Name'] == '$FILE':
+                  print(f['ID'])
+          ")
+          if [ -n "$FILE_ID" ]; then
+            echo "https://drive.google.com/file/d/$FILE_ID/view?usp=sharing"
+          else
+            echo "Could not retrieve file ID"
+          fi
