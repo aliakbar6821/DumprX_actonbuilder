@@ -19,13 +19,17 @@ on:
           - googledrive
           - both
       rclone_token:
-        description: 'rclone token JSON (required for googledrive/both)'
+        description: 'rclone token JSON - paste only the {...} part (required for googledrive/both)'
         required: false
 
 jobs:
   upload:
     runs-on: ubuntu-22.04
     steps:
+
+      - name: Mask token from logs
+        if: ${{ inputs.upload_target == 'googledrive' || inputs.upload_target == 'both' }}
+        run: echo "::add-mask::${{ github.event.inputs.rclone_token }}"
 
       - name: Resolve filename
         id: resolve
@@ -34,7 +38,6 @@ jobs:
           URL="${{ github.event.inputs.url }}"
           if [ -z "$INPUT_NAME" ]; then
             RESOLVED=$(basename "${URL%%\?*}")
-            # fallback if basename is empty or just a slash
             if [ -z "$RESOLVED" ] || [ "$RESOLVED" = "/" ]; then
               RESOLVED="downloaded_file"
             fi
@@ -77,12 +80,10 @@ jobs:
         if: ${{ inputs.upload_target == 'googledrive' || inputs.upload_target == 'both' }}
         run: |
           mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf << EOF
-          [gd]
-          type = drive
-          scope = drive
-          token = ${{ github.event.inputs.rclone_token }}
-          EOF
+          printf '[gd]\ntype = drive\nscope = drive\ntoken = %s\n' \
+            '${{ github.event.inputs.rclone_token }}' > ~/.config/rclone/rclone.conf
+          echo "=== Verifying rclone config structure ==="
+          grep -v token ~/.config/rclone/rclone.conf
 
       - name: Upload to Google Drive
         if: ${{ inputs.upload_target == 'googledrive' || inputs.upload_target == 'both' }}
