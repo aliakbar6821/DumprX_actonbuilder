@@ -1,4 +1,4 @@
-name: direct Gofile
+name: Direct Gofile + Google Drive
 
 on:
   workflow_dispatch:
@@ -7,32 +7,89 @@ on:
         description: 'Direct download URL'
         required: true
       filename:
-        description: 'Output filename (e.g. rom.zip)'
+        description: 'Output filename (leave blank to use original filename)'
         required: false
-        default: 'rom.zip'
+        default: ''
+      upload_target:
+        description: 'Upload target'
+        required: true
+        type: choice
+        options:
+          - gofile
+          - googledrive
+          - both
+      rclone_token:
+        description: 'rclone token JSON (required for googledrive/both)'
+        required: false
 
 jobs:
   upload:
     runs-on: ubuntu-22.04
     steps:
 
+      - name: Resolve filename
+        id: resolve
+        run: |
+          INPUT_NAME="${{ github.event.inputs.filename }}"
+          URL="${{ github.event.inputs.url }}"
+          if [ -z "$INPUT_NAME" ]; then
+            RESOLVED=$(basename "${URL%%\?*}")
+            # fallback if basename is empty or just a slash
+            if [ -z "$RESOLVED" ] || [ "$RESOLVED" = "/" ]; then
+              RESOLVED="downloaded_file"
+            fi
+          else
+            RESOLVED="$INPUT_NAME"
+          fi
+          echo "filename=$RESOLVED" >> $GITHUB_OUTPUT
+          echo "Resolved filename: $RESOLVED"
+
       - name: Download file with aria2
         run: |
           sudo apt install -y aria2
           aria2c -x16 -s16 -k1M --check-certificate=false \
-            -o "${{ github.event.inputs.filename }}" \
+            -o "${{ steps.resolve.outputs.filename }}" \
             "${{ github.event.inputs.url }}"
-          ls -lh "${{ github.event.inputs.filename }}"
+          ls -lh "${{ steps.resolve.outputs.filename }}"
 
+      # ── GoFile ────────────────────────────────────────────────
       - name: Clone GoFile Upload script
+        if: ${{ inputs.upload_target == 'gofile' || inputs.upload_target == 'both' }}
         run: |
           git clone https://github.com/Sushrut1101/GoFile-Upload --depth=1
           chmod +x GoFile-Upload/upload.sh
 
       - name: Upload to GoFile
+        if: ${{ inputs.upload_target == 'gofile' || inputs.upload_target == 'both' }}
         run: |
           cd GoFile-Upload
-          bash upload.sh "../${{ github.event.inputs.filename }}" | tee /tmp/gofile_result.txt
+          bash upload.sh "../${{ steps.resolve.outputs.filename }}" | tee /tmp/gofile_result.txt
           echo ""
           echo "=== GoFile Upload Result ==="
           cat /tmp/gofile_result.txt
+
+      # ── Google Drive (rclone) ─────────────────────────────────
+      - name: Install rclone
+        if: ${{ inputs.upload_target == 'googledrive' || inputs.upload_target == 'both' }}
+        run: curl https://rclone.org/install.sh | sudo bash
+
+      - name: Configure rclone for Google Drive
+        if: ${{ inputs.upload_target == 'googledrive' || inputs.upload_target == 'both' }}
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf << EOF
+          [gd]
+          type = drive
+          scope = drive
+          token = ${{ github.event.inputs.rclone_token }}
+          EOF
+
+      - name: Upload to Google Drive
+        if: ${{ inputs.upload_target == 'googledrive' || inputs.upload_target == 'both' }}
+        run: |
+          rclone copy "${{ steps.resolve.outputs.filename }}" gd: \
+            --progress \
+            --transfers 4
+          echo ""
+          echo "=== Google Drive Upload Done ==="
+          rclone ls gd: | grep "${{ steps.resolve.outputs.filename }}"
