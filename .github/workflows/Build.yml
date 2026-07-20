@@ -1,0 +1,162 @@
+name: Stage 1 - Build Golden Rootfs
+on: [workflow_dispatch]
+
+jobs:
+  build-rootfs:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+      options: --privileged
+    steps:
+      - name: Install build tools
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm arch-install-scripts git squashfs-tools base-devel sudo jq curl
+
+      - name: Pacstrap base + full XeroLinux KDE package set
+        run: |
+          mkdir -p rootfs
+          pacstrap -c rootfs \
+            base linux linux-firmware grub efibootmgr networkmanager sudo \
+            kf6 qt6 kde-system libplasma kwin krdp milou breeze oxygen drkonqi kwrited \
+            kgamma kscreen kmenuedit bluedevil kpipewire plasma-nm plasma-pa \
+            plasma-sdk libkscreen breeze-gtk breeze-cursors breeze-icons powerdevil \
+            kinfocenter flatpak-kcm kdecoration ksshaskpass kwallet-pam \
+            libksysguard plasma-vault ksystemstats kde-cli-tools oxygen-sounds \
+            kscreenlocker kglobalacceld systemsettings kde-gtk-config layer-shell-qt \
+            plasma-desktop polkit-kde-agent plasma-workspace kdeplasma-addons \
+            ocean-sound-theme qqc2-breeze-style kactivitymanagerd \
+            plasma-integration plasma-thunderbolt plasma-systemmonitor \
+            xdg-desktop-portal-kde plasma-browser-integration plasma-keyboard \
+            krdc krfb smb4k alligator kdeconnect kio-admin kio-extras kio-gdrive \
+            konversation kio-zeroconf kdenetwork-filesharing signon-kwallet-extension \
+            okular kamera svgpart skanlite gwenview spectacle colord-kde kcolorchooser \
+            kimagemapeditor kdegraphics-thumbnailers \
+            ark kate kgpg kfind sweeper konsole kdialog yakuake skanpage filelight \
+            kmousetool kcharselect markdownpart qalculate-qt keditbookmarks kdebugsettings \
+            kwalletmanager dolphin-plugins \
+            k3b kamoso audiotube plasmatube audiocd-kio \
+            waypipe egl-wayland qt6-wayland wayland-protocols \
+            kwayland-integration plasma-wayland-protocols ocrad \
+            switcheroo-control power-profiles-daemon brightnessctl \
+            duf gcc npm yad zip xdo gum inxi lzop nmon tree vala btop glfw htop lshw \
+            cblas expac fuse3 lhasa meson unace unrar unzip p7zip iftop nvtop rhash sshfs \
+            vnstat nodejs cronie hwinfo arandr assimp netpbm wmctrl grsync libmtp polkit \
+            sysprof zenity gparted plocate jsoncpp fuseiso gettext node-gyp \
+            intltool graphviz pkgstats pciutils inetutils downgrade s3fs-fuse playerctl \
+            asciinema oniguruma cifs-utils lsb-release python-dbus dconf-editor \
+            laptop-detect perl-xml-parser gnome-disk-utility appmenu-gtk-module \
+            parallel xsettingsd polkit-qt6 \
+            yt-dlp wavpack unarchiver gnustep-base xmlstarlet \
+            libgsf tumbler freetype2 libopenraw poppler-qt6 poppler-glib ffmpegthumbnailer \
+            gvfs mtpfs udiskie udisks2 gvfs-afc gvfs-mtp gvfs-nfs gvfs-smb \
+            gvfs-goa gvfs-dnssd gvfs-gphoto2 \
+            flatpak appstream-qt pacman-contrib \
+            ffmpeg ffmpegthumbs \
+            bat bat-extras jq figlet lolcat numlockx localsend lm_sensors \
+            appstream-glib \
+            xmlto ckbcomp yaml-cpp kirigami boost-libs polkit-gnome gtk-update-icon-cache \
+            dex libxinerama bash-completion \
+            cryptsetup mkinitcpio-utils \
+            boost kpmcore xdg-terminal-exec-git \
+            eza ntp cava most dialog bind logrotate xdg-user-dirs \
+            rsync sdparm ntfs-3g tpm2-tss udftools syslinux fatresize \
+            nfs-utils exfatprogs tpm2-tools fsarchiver squashfs-tools \
+            gpart dmraid parted hdparm usbmuxd usbutils testdisk ddrescue timeshift \
+            partclone partimage open-iscsi usb_modeswitch \
+            fd tmux nvme-cli terminus-font foot-terminfo kitty-terminfo \
+            pv mc gpm nbd lvm2 bolt lynx tldr nmap irssi mdadm \
+            mtools lsscsi ndisc6 screen tcpdump ethtool xdotool pcsclite \
+            espeakup libfido2 xdg-utils smartmontools \
+            sequoia-sq python-pyqt6 libusb-compat wireguard-tools \
+            python-pip python-cffi python-numpy python-docopt python-pyaudio \
+            python-pyparted python-pygments python-websockets \
+            ttf-fira-code otf-libertinus tex-gyre-fonts ttf-hack-nerd ttf-ubuntu-font-family \
+            awesome-terminal-fonts ttf-jetbrains-mono-nerd adobe-source-sans-fonts \
+            kwin-zones kde-wallpapers kwin-scripts-kzones tela-circle-icon-theme-purple \
+            kvantum fastfetch adw-gtk-theme gnome-themes-extra \
+            bash-language-server typescript-language-server vscode-json-languageserver \
+            firefox
+
+      - name: Generate fstab
+        run: genfstab -U rootfs >> rootfs/etc/fstab
+
+      - name: Copy DNS resolver into chroot
+        run: cp /etc/resolv.conf rootfs/etc/resolv.conf
+
+      - name: Enable core services inside chroot
+        run: |
+          arch-chroot rootfs systemctl enable sddm
+          arch-chroot rootfs systemctl enable NetworkManager
+          arch-chroot rootfs systemctl enable bluetooth
+          arch-chroot rootfs systemctl enable cups.socket
+
+      - name: Create builder user for AUR packages
+        run: |
+          arch-chroot rootfs useradd -m -G wheel builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> rootfs/etc/sudoers
+
+      - name: Install paru (AUR helper) inside chroot
+        run: |
+          arch-chroot rootfs sudo -u builder bash -c "
+            cd /home/builder &&
+            git clone https://aur.archlinux.org/paru-bin.git &&
+            cd paru-bin &&
+            makepkg -si --noconfirm
+          "
+
+      - name: Install XeroLinux AUR packages
+        run: |
+          arch-chroot rootfs sudo -u builder bash -c "
+            cd /home/builder &&
+            paru -S --noconfirm --skipreview xero-toolkit xpm-gui extra-scripts desktop-config xero-gpu-tools oh-my-posh-bin kwin-effect-rounded-corners-git
+          " || echo "Some AUR packages failed — check log, continuing"
+
+      - name: Install XeroDark SDDM theme
+        run: |
+          git clone https://github.com/xerolinux/XeroDark.git rootfs/usr/share/sddm/themes/XeroDark
+          mkdir -p rootfs/etc/sddm.conf.d
+          cat > rootfs/etc/sddm.conf.d/kde_settings.conf << 'EOF'
+          [Theme]
+          Current=XeroDark
+          EOF
+
+      - name: Install XeroLayan GRUB theme
+        run: |
+          git clone --depth=1 https://github.com/xerolinux/xero-layan-git.git /tmp/xero-layan
+          mkdir -p rootfs/boot/grub/themes/XeroLayan
+          cp -a /tmp/xero-layan/XeroLayan/. rootfs/boot/grub/themes/XeroLayan/
+          echo 'GRUB_THEME="/boot/grub/themes/XeroLayan/theme.txt"' >> rootfs/etc/default/grub
+
+      - name: Remove builder passwordless sudo (security cleanup)
+        run: sed -i '/builder ALL=(ALL) NOPASSWD: ALL/d' rootfs/etc/sudoers
+
+      - name: Clean pacman cache to shrink image
+        run: arch-chroot rootfs pacman -Scc --noconfirm
+
+      - name: Squash the rootfs
+        run: mksquashfs rootfs airootfs.sfs -comp zstd -Xcompression-level 19
+
+      - name: Show size
+        run: ls -lh airootfs.sfs
+
+      - name: Upload golden rootfs to GoFile (with retry)
+        run: |
+          curl -o upload.sh https://raw.githubusercontent.com/Sushrut1101/GoFile-Upload/master/upload.sh
+          chmod +x upload.sh
+
+          MAX_RETRIES=3
+          ATTEMPT=1
+          until ./upload.sh airootfs.sfs | tee gofile_output.txt; do
+            if [ "$ATTEMPT" -ge "$MAX_RETRIES" ]; then
+              echo "Upload failed after $MAX_RETRIES attempts."
+              exit 1
+            fi
+            echo "Upload attempt $ATTEMPT failed, retrying in 15s..."
+            ATTEMPT=$((ATTEMPT+1))
+            sleep 15
+          done
+
+      - name: Extract and display download link
+        run: |
+          grep -o 'https://gofile.io/d/[a-zA-Z0-9]*' gofile_output.txt || cat gofile_output.txt
